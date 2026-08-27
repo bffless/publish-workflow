@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
 
@@ -113,6 +113,30 @@ test('a re-run replaces the staged set instead of merging into it', async () => 
   })
   assert.equal(existsSync(join(outDir, 'rules', 'stale.rule.yaml')), false)
   assert.ok(existsSync(join(outDir, 'rules', '_custom', 'forward', 'get.rule.yaml')))
+})
+
+test('refuses to stage into the rule set directory itself', async () => {
+  // rmSync(outDir) runs before the copy, so an outDir equal to (or containing, or contained
+  // by) rulesDir would delete the source out from under the run. Run against a COPY of the
+  // fixture: if this guard ever regresses, the regression eats the copy, not the checkout.
+  const rulesDir = join(tmp(), 'hello')
+  cpSync(fixture('hello'), rulesDir, { recursive: true })
+
+  for (const outDir of [rulesDir, join(rulesDir, 'staged'), dirname(rulesDir)]) {
+    await assert.rejects(
+      prepareRules({ rulesDir, alias: 'hello', targetUrl: 'https://x.example.test', outDir }),
+      /--out/,
+      `expected outDir ${outDir} to be refused`,
+    )
+  }
+  assert.ok(existsSync(join(rulesDir, 'ruleset.yaml')), 'the source set must survive')
+})
+
+test('requires an out directory', async () => {
+  await assert.rejects(
+    prepareRules({ rulesDir: fixture('hello'), alias: 'hello', targetUrl: 'https://x.example.test', outDir: '' }),
+    /--out is required/,
+  )
 })
 
 test('fails when the rule set directory is not a rule set', async () => {

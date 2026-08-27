@@ -12,7 +12,7 @@
  * re-run, or a second implementation in the same job, sees the same source it started with.
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseDocument, stringify } from 'yaml'
 
@@ -53,6 +53,28 @@ export function assertTargetUrl(targetUrl) {
   }
 }
 
+/** True when `child` is `parent` or lives underneath it. */
+function contains(parent, child) {
+  const rel = relative(parent, child)
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
+}
+
+/**
+ * The staging directory is wiped before the copy, so it may not overlap the source: an
+ * `--out` equal to, inside, or containing the rule set would delete the checkout.
+ */
+export function assertDisjoint(rulesDir, outDir) {
+  if (!outDir) throw new Error('--out is required: the directory to stage the rule set into')
+  const src = resolve(rulesDir)
+  const dst = resolve(outDir)
+  if (contains(src, dst) || contains(dst, src)) {
+    throw new Error(
+      `--out "${outDir}" overlaps the rule set "${rulesDir}": the staging directory is ` +
+        'deleted before the copy, so it must be somewhere else entirely (e.g. $RUNNER_TEMP).',
+    )
+  }
+}
+
 export function assertAlias(alias) {
   if (!alias) throw new Error('alias is required')
   if (RESERVED_ALIASES.includes(alias)) {
@@ -79,6 +101,8 @@ export async function prepareRules({ rulesDir, alias, targetUrl, outDir }) {
         'by bffless/publish-workflow — delete the authored copy.',
     )
   }
+
+  assertDisjoint(rulesDir, outDir)
 
   // Replace, never merge: a re-run (or a second implementation reusing the path) must not
   // inherit a rule file the previous staging left behind — it would be pushed as ours.
