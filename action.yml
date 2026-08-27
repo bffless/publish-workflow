@@ -10,6 +10,10 @@ branding:
   color: 'blue'
 
 inputs:
+  mode:
+    description: 'publish (build + deploy + attach) or teardown (delete a preview and detach it)'
+    required: false
+    default: 'publish'
   alias:
     description: 'The implementation alias, e.g. "hello". Lowercase, letter-initial, hyphenated.'
     required: true
@@ -25,8 +29,9 @@ inputs:
   target-url:
     description: >-
       The implementation alias host the /w/<alias>/* forwarder points at, e.g.
-      https://hello.j5s.dev. Required until bffless/ce#698 lands `targetUrl: alias://`.
-    required: true
+      https://hello.j5s.dev. Required in publish mode until bffless/ce#698 lands
+      `targetUrl: alias://`. Unused in teardown mode.
+    required: false
   path:
     description: 'Built bundle directory (also the --out of `workflow index`)'
     required: false
@@ -59,6 +64,13 @@ inputs:
     description: 'npm range for @bffless/workflow-lint'
     required: false
     default: '^1.0.0'
+  preview:
+    description: >-
+      Teardown mode only: opt in to tearing down an alias that does not match the
+      preview grammar `<impl>-pr-<n>`. Without it, teardown refuses before any request —
+      the contributor-role key can repoint any alias on the harness project.
+    required: false
+    default: 'false'
 
 outputs:
   rule-set-id:
@@ -70,6 +82,15 @@ outputs:
   index:
     description: 'Path of the written index.json'
     value: ${{ steps.cfg.outputs.index }}
+  detached:
+    description: 'Teardown mode: whether the harness alias was detached from the preview rule set'
+    value: ${{ steps.teardown.outputs.detached }}
+  deleted-alias:
+    description: 'Teardown mode: whether the preview alias was deleted'
+    value: ${{ steps.teardown.outputs.deleted-alias }}
+  deleted-rule-set:
+    description: 'Teardown mode: whether the preview rule set was deleted'
+    value: ${{ steps.teardown.outputs.deleted-rule-set }}
 
 runs:
   using: composite
@@ -87,6 +108,7 @@ runs:
     # resolved once here and every later step reads the resolved value.
     - name: Resolve inputs
       id: cfg
+      if: inputs.mode == 'publish'
       shell: bash
       env:
         ALIAS: ${{ inputs.alias }}
@@ -95,8 +117,15 @@ runs:
         OUT: ${{ inputs.path }}
         WORKFLOWS: ${{ inputs.workflows }}
         DESCRIPTION: ${{ inputs.description }}
+        TARGET_URL: ${{ inputs.target-url }}
       run: |
         set -euo pipefail
+        # target-url is not `required:` at the action level any more (teardown mode does
+        # not need it), so publish mode must check for itself.
+        if [ -z "$TARGET_URL" ]; then
+          echo "::error::input \`target-url\` is required when mode is publish"
+          exit 1
+        fi
         # $GITHUB_OUTPUT is line-oriented, so a newline inside a value would let that value
         # forge further `key=value` lines. Reject one outright rather than sanitising it —
         # none of these inputs has a legitimate multi-line form.
@@ -120,6 +149,7 @@ runs:
     # A failing lint is never published: `index` writes the bundle only when every
     # workflow passes, and an explicit --rules that does not resolve exits 2.
     - name: Lint + index the workflows
+      if: inputs.mode == 'publish'
       shell: bash
       env:
         LINT_VERSION: ${{ inputs.lint-version }}
@@ -138,6 +168,7 @@ runs:
 
     - name: Prepare the rule set (rename + forwarder)
       id: prepare
+      if: inputs.mode == 'publish'
       shell: bash
       env:
         RULES: ${{ steps.cfg.outputs.rules }}
@@ -152,6 +183,7 @@ runs:
 
     - name: Sync the rule set
       id: rules
+      if: inputs.mode == 'publish'
       uses: bffless/deploy-proxy-rules@v1
       with:
         path: ${{ steps.prepare.outputs.dir }}
@@ -164,6 +196,7 @@ runs:
 
     - name: Deploy the bundle
       id: upload
+      if: inputs.mode == 'publish'
       uses: bffless/upload-artifact@v1
       with:
         path: ${{ inputs.path }}
@@ -176,6 +209,7 @@ runs:
         summary-title: Workflow bundle (${{ inputs.alias }})
 
     - name: Attach the rule set to the harness alias
+      if: inputs.mode == 'publish'
       shell: bash
       env:
         BFFLESS_API_KEY: ${{ inputs.api-key }}
@@ -188,3 +222,21 @@ runs:
         set -euo pipefail
         node "$ACTION_PATH/scripts/attach.mjs" --api-url "$API_URL" --repository "$REPOSITORY" \
           --harness-alias "$HARNESS_ALIAS" --rule-set-id "$RULE_SET_ID"
+
+    - name: Tear down the preview
+      id: teardown
+      if: inputs.mode == 'teardown'
+      shell: bash
+      env:
+        BFFLESS_API_KEY: ${{ inputs.api-key }}
+        API_URL: ${{ inputs.api-url }}
+        REPOSITORY: ${{ inputs.repository }}
+        HARNESS_ALIAS: ${{ inputs.harness-alias }}
+        ALIAS: ${{ inputs.alias }}
+        PREVIEW: ${{ inputs.preview }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        node "$ACTION_PATH/scripts/teardown.mjs" --api-url "$API_URL" --repository "$REPOSITORY" \
+          --harness-alias "$HARNESS_ALIAS" --alias "$ALIAS" --preview "$PREVIEW" \
+          >> "$GITHUB_OUTPUT"

@@ -39,6 +39,9 @@ The obligations are spec'd in `apps/workflow/docs/spec/06-discovery-publishing-f
    Idempotent: publishing the same implementation twice makes no *write* the second time
    (the GET always runs).
 
+   On PR close, tear the preview down with `mode: teardown` (below) — the inverse of this
+   step, plus deleting the preview's own alias and rule set.
+
 ### Why the forwarder
 
 Everything the browser talks to must be **one origin** — the harness host (ADR-0001, D2).
@@ -78,31 +81,104 @@ that does not resolve as an error, so the publish exits 2 before anything is dep
     target-url: https://hello-pr-${{ github.event.number }}.j5s.dev
 ```
 
+`target-url` above assumes the install maps `hello-pr-<n>.j5s.dev` to the preview alias.
+Nothing here creates that mapping — a preview alias is still fully discoverable and attached
+to the harness without one, which is what `mode: teardown` (below) cleans up.
+
+### Preview teardown (`mode: teardown`)
+
+On PR close, delete the preview alias and its rule set, and detach it from the harness
+alias — the inverse of obligations 3–5 above. It needs no build, no bundle and no lint, so
+none of `path`, `workflows` or `target-url` are read in this mode:
+
+```yaml
+- uses: bffless/publish-workflow@v1
+  with:
+    mode: teardown
+    alias: hello-pr-${{ github.event.number }}
+    api-url: https://j5s.dev
+    api-key: ${{ secrets.BFFLESS_API_KEY }}
+    repository: bffless/workflow
+```
+
+A full preview `preview.yml` (this lives in the **implementation** repo, e.g.
+`bffless/workflow-hello`, not here):
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  preview:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      # ... build the bundle into dist/ ...
+      - uses: bffless/publish-workflow@v1
+        with:
+          alias: hello-pr-${{ github.event.number }}
+          rules: .bffless/proxy-rules/hello
+          api-url: https://j5s.dev
+          api-key: ${{ secrets.BFFLESS_API_KEY }}
+          repository: bffless/workflow
+          target-url: https://hello-pr-${{ github.event.number }}.j5s.dev
+
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: bffless/publish-workflow@v1
+        with:
+          mode: teardown
+          alias: hello-pr-${{ github.event.number }}
+          api-url: https://j5s.dev
+          api-key: ${{ secrets.BFFLESS_API_KEY }}
+          repository: bffless/workflow
+```
+
+**Idempotent.** Every step tolerates "already gone": closing the same PR twice, or a
+teardown that runs after a manual cleanup, makes no write and exits 0.
+
+**Refuses a non-preview alias.** `alias` must match `^[a-z][a-z0-9-]*-pr-[0-9]+$`, or the
+step fails **before making any request** — the API key's `contributor` role can repoint or
+delete any alias on the harness project, so a plain `alias: hello` (production) must not
+reach teardown by accident. To tear down a non-preview alias on purpose, pass `preview: true`.
+
+**Never deletes a rule set it didn't publish.** Before deleting a rule set, teardown
+re-fetches it and confirms its `name` matches `alias`; a mismatch refuses rather than
+deleting.
+
 ## Inputs
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
+| `mode` | no | `publish` | `publish` (build + deploy + attach) or `teardown` (delete a preview and detach it). |
 | `alias` | yes | — | The implementation alias, e.g. `hello`. `^[a-z][a-z0-9-]*$`; `workflow`, `w`, `auth` and `_bffless` are reserved. |
 | `api-url` | yes | — | Base URL of the BFFless instance, e.g. `https://j5s.dev`. |
 | `api-key` | yes | — | API key (`X-API-Key`). Needs a **project role** on the harness project — see below. |
 | `repository` | yes | — | The **harness** project, `owner/name`. The alias and the rule set are created there. |
-| `target-url` | yes | — | The implementation alias host the forwarder points at, e.g. `https://hello.j5s.dev`. Required until bffless/ce#698. |
-| `path` | no | `dist` | Built bundle directory; also `workflow index --out`. |
-| `workflows` | no | `.bffless/workflows` | Directory of authored workflow YAML. |
-| `rules` | no | `.bffless/proxy-rules/<alias>` | The implementation's rule-set directory (contains `ruleset.yaml`). |
+| `target-url` | no | — | The implementation alias host the forwarder points at, e.g. `https://hello.j5s.dev`. Required in publish mode until bffless/ce#698; unused in teardown mode. |
+| `path` | no | `dist` | Built bundle directory; also `workflow index --out`. Publish mode only. |
+| `workflows` | no | `.bffless/workflows` | Directory of authored workflow YAML. Publish mode only. |
+| `rules` | no | `.bffless/proxy-rules/<alias>` | The implementation's rule-set directory (contains `ruleset.yaml`). Publish mode only. |
 | `harness-alias` | no | `workflow` | The alias carrying the union of implementation rule sets. |
-| `name` | no | the alias | Display name on the Implementations screen. |
-| `description` | no | — | One line about the bundle. |
-| `prune` | no | `true` | Delete rules/schemas on the server that are absent from source. |
-| `lint-version` | no | `^1.0.0` | npm range for `@bffless/workflow-lint`. |
+| `name` | no | the alias | Display name on the Implementations screen. Publish mode only. |
+| `description` | no | — | One line about the bundle. Publish mode only. |
+| `prune` | no | `true` | Delete rules/schemas on the server that are absent from source. Publish mode only. |
+| `lint-version` | no | `^1.0.0` | npm range for `@bffless/workflow-lint`. Publish mode only. |
+| `preview` | no | `false` | Teardown mode only: opt in to tearing down an alias that does not match the preview grammar. |
 
 ## Outputs
 
 | Output | Description |
 | --- | --- |
-| `rule-set-id` | The synced rule set ID (comma-separated if the set expanded to several). |
-| `deployment-id` | The deployment ID of the uploaded bundle. |
-| `index` | Path of the written `index.json` (`<path>/.bffless/workflows/index.json`). |
+| `rule-set-id` | Publish mode: the synced rule set ID (comma-separated if the set expanded to several). |
+| `deployment-id` | Publish mode: the deployment ID of the uploaded bundle. |
+| `index` | Publish mode: path of the written `index.json` (`<path>/.bffless/workflows/index.json`). |
+| `detached` | Teardown mode: whether the harness alias was detached from the preview rule set. |
+| `deleted-alias` | Teardown mode: whether the preview alias was deleted. |
+| `deleted-rule-set` | Teardown mode: whether the preview rule set was deleted. |
 
 ## Still manual, per install
 
@@ -121,18 +197,11 @@ one-time setup it deliberately does not touch:
   "upload PUT failed". Probe with `curl -X OPTIONS`.
 - **A `contributor` project role for the API key.** An API key is never admin —
   `api-key.guard` pins the role to `user`, and `project_permissions` rows are the only
-  authority. Reading the harness aliases needs **`viewer`**; the attach step's `PATCH` needs
-  **`contributor`** (`deployments.service.ts` `updateAlias` →
-  `checkProjectAccess(..., 'contributor')`). Grant the key's user `contributor` on the
-  harness project. See [bffless/ce#701](https://github.com/bffless/ce/issues/701).
-
-## Not yet: preview teardown
-
-Spec 06 obligation 5 — on PR close, delete the preview alias and its rule set (detaching it
-from the harness alias) — is **deferred**. It is a separate verb, not a mode of this action:
-it needs no build, no bundle and no lint, and running it as a `types: [closed]` job means a
-different set of inputs. Until it exists, preview aliases and their rule sets accumulate on
-the harness project and are removed by hand.
+  authority. Reading the harness aliases needs **`viewer`**; the attach step's `PATCH`, and
+  teardown's `PATCH`/`DELETE alias`/`DELETE rule set`, need **`contributor`**
+  (`deployments.service.ts` `updateAlias` → `checkProjectAccess(..., 'contributor')`).
+  Grant the key's user `contributor` on the harness project. See
+  [bffless/ce#701](https://github.com/bffless/ce/issues/701).
 
 ## Development
 
@@ -142,8 +211,9 @@ npm test        # node --test; no vitest, no build step
 ```
 
 `scripts/prepare-rules.mjs` and `scripts/attach.mjs` are plain ESM with one runtime
-dependency (`yaml`); the composite runs `npm ci --omit=dev` in `$GITHUB_ACTION_PATH` before
-calling them. There is no `dist/` to keep in sync.
+dependency (`yaml`); `scripts/teardown.mjs` has none. The composite runs
+`npm ci --omit=dev` in `$GITHUB_ACTION_PATH` before calling any of them. There is no
+`dist/` to keep in sync.
 
 ## Licence
 

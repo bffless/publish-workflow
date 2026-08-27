@@ -1,6 +1,6 @@
 {
   "name": "publish-workflow",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Composite GitHub Action that publishes a BFFless Workflow implementation",
