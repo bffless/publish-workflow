@@ -11,7 +11,7 @@
  * Both edits happen on a COPY under $RUNNER_TEMP — the checkout is left untouched so a
  * re-run, or a second implementation in the same job, sees the same source it started with.
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseDocument, stringify } from 'yaml'
@@ -31,6 +31,28 @@ const forwarderDescription = (alias) =>
   'on the harness host → the implementation alias. targetUrl is per-install until CE grows ' +
   'targetUrl: alias:// (bffless/ce#698).'
 
+/**
+ * The forwarder's targetUrl becomes a live proxy target, so it must be an absolute http(s)
+ * origin — a bare host or a relative path would sync fine and then 502 at request time.
+ */
+export function assertTargetUrl(targetUrl) {
+  if (!targetUrl) {
+    throw new Error(
+      'target-url is required: the implementation alias host the forwarder points at ' +
+        '(e.g. https://hello.j5s.dev). Required until bffless/ce#698 lands alias:// targets.',
+    )
+  }
+  let url
+  try {
+    url = new URL(targetUrl)
+  } catch {
+    throw new Error(`target-url "${targetUrl}" is not an absolute URL (e.g. https://hello.j5s.dev)`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`target-url "${targetUrl}" must be http: or https: (got ${url.protocol})`)
+  }
+}
+
 export function assertAlias(alias) {
   if (!alias) throw new Error('alias is required')
   if (RESERVED_ALIASES.includes(alias)) {
@@ -47,12 +69,7 @@ export function assertAlias(alias) {
  */
 export async function prepareRules({ rulesDir, alias, targetUrl, outDir }) {
   assertAlias(alias)
-  if (!targetUrl) {
-    throw new Error(
-      'target-url is required: the implementation alias host the forwarder points at ' +
-        '(e.g. https://hello.j5s.dev). Required until bffless/ce#698 lands alias:// targets.',
-    )
-  }
+  assertTargetUrl(targetUrl)
   if (!existsSync(join(rulesDir, 'ruleset.yaml'))) {
     throw new Error(`not a rule set (no ruleset.yaml): ${rulesDir}`)
   }
@@ -63,6 +80,9 @@ export async function prepareRules({ rulesDir, alias, targetUrl, outDir }) {
     )
   }
 
+  // Replace, never merge: a re-run (or a second implementation reusing the path) must not
+  // inherit a rule file the previous staging left behind — it would be pushed as ours.
+  rmSync(outDir, { recursive: true, force: true })
   mkdirSync(dirname(outDir), { recursive: true })
   cpSync(rulesDir, outDir, { recursive: true, force: true })
 

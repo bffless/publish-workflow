@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
 
@@ -70,5 +73,37 @@ test('never interpolates an input straight into a run: script', () => {
   for (const step of action.runs.steps) {
     if (!step.run) continue
     assert.doesNotMatch(step.run, /\$\{\{\s*inputs\./, `step "${step.name}" interpolates an input into run:`)
+  }
+})
+
+// The "Resolve inputs" step writes to $GITHUB_OUTPUT, which is line-oriented: a newline in
+// an input value could forge extra key=value lines. Run the real script, not a paraphrase.
+const cfg = action.runs.steps.find((s) => s.id === 'cfg')
+const runCfg = (env) => {
+  const out = join(mkdtempSync(join(tmpdir(), 'publish-workflow-cfg-')), 'out')
+  const base = { ALIAS: 'hello', RULES: '', NAME: '', OUT: 'dist', WORKFLOWS: '.bffless/workflows', DESCRIPTION: '' }
+  try {
+    execFileSync('bash', ['-c', cfg.run], {
+      env: { ...process.env, ...base, ...env, GITHUB_OUTPUT: out },
+      stdio: 'pipe',
+    })
+  } catch (e) {
+    return { failed: true, stdout: String(e.stdout ?? ''), file: existsSync(out) ? readFileSync(out, 'utf8') : '' }
+  }
+  return { failed: false, stdout: '', file: readFileSync(out, 'utf8') }
+}
+
+test('Resolve inputs writes the derived defaults', () => {
+  const { failed, file } = runCfg({ DESCRIPTION: 'A demo' })
+  assert.equal(failed, false)
+  assert.equal(file, 'rules=.bffless/proxy-rules/hello\nname=hello\nindex=dist/.bffless/workflows/index.json\n')
+})
+
+test('Resolve inputs rejects a newline in any guarded input', () => {
+  for (const key of ['ALIAS', 'RULES', 'NAME', 'OUT', 'WORKFLOWS', 'DESCRIPTION']) {
+    const { failed, stdout, file } = runCfg({ [key]: 'evil\nindex=/etc/passwd' })
+    assert.equal(failed, true, `${key} with a newline should fail the step`)
+    assert.match(stdout, /::error::input `[a-z]+` must not contain a newline/)
+    assert.equal(file, '', `${key} must not have written any output`)
   }
 })

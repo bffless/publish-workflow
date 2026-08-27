@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,15 +24,15 @@ test('copies the set, renames it, writes the forwarder', async () => {
   assert.equal(ruleset.name, 'hello-pr-3')
   assert.equal(ruleset.description, "The hello Workflow implementation's API.")
 
-  const fwd = readYaml(`${out}/rules/_custom/forward/get.rule.yaml`)
+  const { description, ...fwd } = readYaml(`${out}/rules/_custom/forward/get.rule.yaml`)
   assert.deepEqual(fwd, {
     pathPattern: '/w/hello-pr-3/*',
     targetUrl: 'https://hello-pr-3.example.test',
     forwardCookies: true,
     order: 5,
-    description: fwd.description,
   })
-  assert.match(fwd.description, /bffless\/publish-workflow/)
+  assert.match(description, /bffless\/publish-workflow/)
+  assert.match(description, /hello-pr-3/)
 
   assert.ok(existsSync(`${out}/rules/echo/post/rule.yaml`))
 })
@@ -73,6 +73,46 @@ test('requires a target url', async () => {
     prepareRules({ rulesDir: fixture('hello'), alias: 'hello', targetUrl: '', outDir: tmp() }),
     /target-url/,
   )
+})
+
+test('rejects a target url that is not an absolute http(s) URL', async () => {
+  for (const targetUrl of ['hello.example.test', '/w/hello', 'ftp://hello.example.test', 'javascript:alert(1)']) {
+    await assert.rejects(
+      prepareRules({ rulesDir: fixture('hello'), alias: 'hello', targetUrl, outDir: tmp() }),
+      /target-url/,
+      `expected ${targetUrl} to be rejected`,
+    )
+  }
+})
+
+test('accepts an http target url', async () => {
+  const out = await prepareRules({
+    rulesDir: fixture('hello'),
+    alias: 'hello',
+    targetUrl: 'http://localhost:5173',
+    outDir: tmp(),
+  })
+  assert.equal(readYaml(`${out}/rules/_custom/forward/get.rule.yaml`).targetUrl, 'http://localhost:5173')
+})
+
+test('a re-run replaces the staged set instead of merging into it', async () => {
+  const outDir = tmp()
+  const first = await prepareRules({
+    rulesDir: fixture('hello'),
+    alias: 'hello',
+    targetUrl: 'https://hello.example.test',
+    outDir,
+  })
+  // A stale artefact from an earlier run of a *different* set must not survive.
+  writeFileSync(join(first, 'rules', 'stale.rule.yaml'), 'pathPattern: /stale\n')
+  await prepareRules({
+    rulesDir: fixture('hello'),
+    alias: 'hello',
+    targetUrl: 'https://hello.example.test',
+    outDir,
+  })
+  assert.equal(existsSync(join(outDir, 'rules', 'stale.rule.yaml')), false)
+  assert.ok(existsSync(join(outDir, 'rules', '_custom', 'forward', 'get.rule.yaml')))
 })
 
 test('fails when the rule set directory is not a rule set', async () => {

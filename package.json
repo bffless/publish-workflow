@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Composite GitHub Action that publishes a BFFless Workflow implementation",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "engines": {
     "node": ">=20"
   },

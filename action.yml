@@ -93,8 +93,24 @@ runs:
         RULES: ${{ inputs.rules }}
         NAME: ${{ inputs.name }}
         OUT: ${{ inputs.path }}
+        WORKFLOWS: ${{ inputs.workflows }}
+        DESCRIPTION: ${{ inputs.description }}
       run: |
         set -euo pipefail
+        # $GITHUB_OUTPUT is line-oriented, so a newline inside a value would let that value
+        # forge further `key=value` lines. Reject one outright rather than sanitising it —
+        # none of these inputs has a legitimate multi-line form.
+        reject_newline() {
+          case "$2" in
+            *$'\n'*) echo "::error::input \`$1\` must not contain a newline"; exit 1 ;;
+          esac
+        }
+        reject_newline alias "$ALIAS"
+        reject_newline rules "$RULES"
+        reject_newline name "$NAME"
+        reject_newline path "$OUT"
+        reject_newline workflows "$WORKFLOWS"
+        reject_newline description "$DESCRIPTION"
         {
           echo "rules=${RULES:-.bffless/proxy-rules/$ALIAS}"
           echo "name=${NAME:-$ALIAS}"

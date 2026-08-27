@@ -36,7 +36,8 @@ The obligations are spec'd in `apps/workflow/docs/spec/06-discovery-publishing-f
    `base-path: /` and attaches the `<alias>` rule set to that alias by name.
 5. **Attach to the harness alias** — `PATCH /api/repo/<owner>/<repo>/aliases/<harness-alias>`
    with the **ordered union** of the harness alias' existing `proxyRuleSetIds` and this one.
-   Idempotent: publishing the same implementation twice makes no request the second time.
+   Idempotent: publishing the same implementation twice makes no *write* the second time
+   (the GET always runs).
 
 ### Why the forwarder
 
@@ -59,6 +60,23 @@ The forwarder carries an **explicit** `pathPattern:`, which `--path-prefix` neve
 rule set on the harness alias, and a *preview* entry on the harness's Implementations screen.
 The workflow YAML is byte-identical between production and preview because workflow paths are
 relative (D17) and the prefix is added at publish time.
+
+**A preview run must pass `rules:` explicitly.** The rule-set directory on disk is named for
+the **implementation**, not for the alias — `.bffless/proxy-rules/hello` stays put while the
+alias becomes `hello-pr-12`. The `rules` default (`.bffless/proxy-rules/<alias>`) would
+resolve to a directory that does not exist, and `workflow index` treats an explicit `--rules`
+that does not resolve as an error, so the publish exits 2 before anything is deployed:
+
+```yaml
+- uses: bffless/publish-workflow@v1
+  with:
+    alias: hello-pr-${{ github.event.number }}
+    rules: .bffless/proxy-rules/hello        # named for the impl, not the alias
+    api-url: https://j5s.dev
+    api-key: ${{ secrets.BFFLESS_API_KEY }}
+    repository: bffless/workflow
+    target-url: https://hello-pr-${{ github.event.number }}.j5s.dev
+```
 
 ## Inputs
 
@@ -101,10 +119,12 @@ one-time setup it deliberately does not touch:
 - **Bucket CORS.** The storage bucket must list the harness origin (e.g.
   `https://workflow.j5s.dev`), or browser uploads fail with a status-less
   "upload PUT failed". Probe with `curl -X OPTIONS`.
-- **A project role for the API key.** An API key is never admin — `api-key.guard` pins the
-  role to `user`, and `project_permissions` rows are the only authority. The key's user
-  needs at least `viewer` on the harness project to read its aliases, and enough to write
-  one. See [bffless/ce#701](https://github.com/bffless/ce/issues/701).
+- **A `contributor` project role for the API key.** An API key is never admin —
+  `api-key.guard` pins the role to `user`, and `project_permissions` rows are the only
+  authority. Reading the harness aliases needs **`viewer`**; the attach step's `PATCH` needs
+  **`contributor`** (`deployments.service.ts` `updateAlias` →
+  `checkProjectAccess(..., 'contributor')`). Grant the key's user `contributor` on the
+  harness project. See [bffless/ce#701](https://github.com/bffless/ce/issues/701).
 
 ## Not yet: preview teardown
 
@@ -127,4 +147,4 @@ calling them. There is no `dist/` to keep in sync.
 
 ## Licence
 
-MIT — see [LICENSE.md](LICENSE.md).
+See [LICENSE.md](LICENSE.md).
