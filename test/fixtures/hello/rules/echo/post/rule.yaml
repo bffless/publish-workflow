@@ -1,0 +1,7 @@
+description: Echo the posted body back.
+pipeline:
+  steps:
+    - handler: response_handler
+      config:
+        statusCode: 200
+        body: '{"ok":true}'

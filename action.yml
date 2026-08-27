@@ -1,0 +1,174 @@
+name: 'Publish a BFFless Workflow implementation'
+description: >-
+  Lint + index the workflows, sync the rule set under /api/<alias>/ with a generated
+  /w/<alias>/ forwarder, deploy the bundle to alias <alias>, and attach the set to the
+  harness alias.
+author: 'bffless'
+
+branding:
+  icon: 'git-branch'
+  color: 'blue'
+
+inputs:
+  alias:
+    description: 'The implementation alias, e.g. "hello". Lowercase, letter-initial, hyphenated.'
+    required: true
+  api-url:
+    description: 'Base URL of the BFFless instance, e.g. https://j5s.dev'
+    required: true
+  api-key:
+    description: 'API key for authentication (X-API-Key header)'
+    required: true
+  repository:
+    description: 'The harness project, owner/name — where the alias and rule set live'
+    required: true
+  target-url:
+    description: >-
+      The implementation alias host the /w/<alias>/* forwarder points at, e.g.
+      https://hello.j5s.dev. Required until bffless/ce#698 lands `targetUrl: alias://`.
+    required: true
+  path:
+    description: 'Built bundle directory (also the --out of `workflow index`)'
+    required: false
+    default: 'dist'
+  workflows:
+    description: 'Directory of authored workflow YAML'
+    required: false
+    default: '.bffless/workflows'
+  rules:
+    description: 'The implementation rule-set directory (default: .bffless/proxy-rules/<alias>)'
+    required: false
+    default: ''
+  harness-alias:
+    description: 'The harness alias that carries the union of implementation rule sets'
+    required: false
+    default: 'workflow'
+  name:
+    description: 'Display name on the Implementations screen (default: the alias)'
+    required: false
+    default: ''
+  description:
+    description: 'One line about the bundle, shown on the Implementations screen'
+    required: false
+    default: ''
+  prune:
+    description: 'Delete rules/schemas on the server that are absent from source'
+    required: false
+    default: 'true'
+  lint-version:
+    description: 'npm range for @bffless/workflow-lint'
+    required: false
+    default: '^1.0.0'
+
+outputs:
+  rule-set-id:
+    description: 'The synced rule set ID (comma-separated if the set expanded to several)'
+    value: ${{ steps.rules.outputs.rule-set-ids }}
+  deployment-id:
+    description: 'The deployment ID of the uploaded bundle'
+    value: ${{ steps.upload.outputs.deployment-id }}
+  index:
+    description: 'Path of the written index.json'
+    value: ${{ steps.cfg.outputs.index }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install action deps
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev
+
+    # Defaults that depend on another input cannot live in `inputs.*.default`, so they are
+    # resolved once here and every later step reads the resolved value.
+    - name: Resolve inputs
+      id: cfg
+      shell: bash
+      env:
+        ALIAS: ${{ inputs.alias }}
+        RULES: ${{ inputs.rules }}
+        NAME: ${{ inputs.name }}
+        OUT: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        {
+          echo "rules=${RULES:-.bffless/proxy-rules/$ALIAS}"
+          echo "name=${NAME:-$ALIAS}"
+          echo "index=$OUT/.bffless/workflows/index.json"
+        } >> "$GITHUB_OUTPUT"
+
+    # A failing lint is never published: `index` writes the bundle only when every
+    # workflow passes, and an explicit --rules that does not resolve exits 2.
+    - name: Lint + index the workflows
+      shell: bash
+      env:
+        LINT_VERSION: ${{ inputs.lint-version }}
+        WORKFLOWS: ${{ inputs.workflows }}
+        OUT: ${{ inputs.path }}
+        ALIAS: ${{ inputs.alias }}
+        NAME: ${{ steps.cfg.outputs.name }}
+        DESCRIPTION: ${{ inputs.description }}
+        RULES: ${{ steps.cfg.outputs.rules }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        npx --yes "@bffless/workflow-lint@$LINT_VERSION" index "$WORKFLOWS" \
+          --out "$OUT" --impl "$ALIAS" --name "$NAME" --description "$DESCRIPTION" \
+          --rules "$RULES" --path-prefix "/api/$ALIAS" --commit "$SHA"
+
+    - name: Prepare the rule set (rename + forwarder)
+      id: prepare
+      shell: bash
+      env:
+        RULES: ${{ steps.cfg.outputs.rules }}
+        ALIAS: ${{ inputs.alias }}
+        TARGET_URL: ${{ inputs.target-url }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        node "$ACTION_PATH/scripts/prepare-rules.mjs" --rules "$RULES" --alias "$ALIAS" \
+          --target-url "$TARGET_URL" --out "$RUNNER_TEMP/publish-workflow-rules/$ALIAS" \
+          >> "$GITHUB_OUTPUT"
+
+    - name: Sync the rule set
+      id: rules
+      uses: bffless/deploy-proxy-rules@v1
+      with:
+        path: ${{ steps.prepare.outputs.dir }}
+        path-prefix: /api/${{ inputs.alias }}
+        api-url: ${{ inputs.api-url }}
+        api-key: ${{ inputs.api-key }}
+        project: ${{ inputs.repository }}
+        prune: ${{ inputs.prune }}
+        summary-title: Workflow rules (${{ inputs.alias }})
+
+    - name: Deploy the bundle
+      id: upload
+      uses: bffless/upload-artifact@v1
+      with:
+        path: ${{ inputs.path }}
+        base-path: /
+        api-url: ${{ inputs.api-url }}
+        api-key: ${{ inputs.api-key }}
+        repository: ${{ inputs.repository }}
+        alias: ${{ inputs.alias }}
+        proxy-rule-set-names: ${{ inputs.alias }}
+        summary-title: Workflow bundle (${{ inputs.alias }})
+
+    - name: Attach the rule set to the harness alias
+      shell: bash
+      env:
+        BFFLESS_API_KEY: ${{ inputs.api-key }}
+        API_URL: ${{ inputs.api-url }}
+        REPOSITORY: ${{ inputs.repository }}
+        HARNESS_ALIAS: ${{ inputs.harness-alias }}
+        RULE_SET_ID: ${{ steps.rules.outputs.rule-set-ids }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        node "$ACTION_PATH/scripts/attach.mjs" --api-url "$API_URL" --repository "$REPOSITORY" \
+          --harness-alias "$HARNESS_ALIAS" --rule-set-id "$RULE_SET_ID"

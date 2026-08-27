@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm test
+
+      # actionlint parses everything it is given as a *workflow*, so it lints this file
+      # and not action.yml. The composite's own contract is held by test/action.test.mjs.
+      - name: actionlint
+        uses: raven-actions/actionlint@v2
