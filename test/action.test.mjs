@@ -68,8 +68,8 @@ test('every ${{ steps.X.outputs.Y }} names a step declared earlier', () => {
   check(JSON.stringify(action.outputs), 'outputs')
 })
 
-test('the teardown step runs only in teardown mode; every other step (but setup-node and npm ci) runs only in publish mode', () => {
-  const alwaysOn = new Set(['actions/setup-node@v4', 'Install action deps'])
+test('the teardown step runs only in teardown mode; every other step (but Validate mode, setup-node and npm ci) runs only in publish mode', () => {
+  const alwaysOn = new Set(['Validate mode', 'actions/setup-node@v4', 'Install action deps'])
   for (const step of action.runs.steps) {
     const label = step.name ?? step.uses
     if (alwaysOn.has(label)) {
@@ -91,6 +91,33 @@ test('the teardown step calls scripts/teardown.mjs with the api key in the envir
   assert.doesNotMatch(step.run, /--api-key/)
   assert.match(step.run, /teardown\.mjs/)
   assert.match(step.run, />> "\$GITHUB_OUTPUT"/)
+})
+
+// An unrecognised `mode` must fail loudly rather than silently no-op every gated step.
+const validateMode = action.runs.steps.find((s) => s.name === 'Validate mode')
+const runValidateMode = (mode) => {
+  try {
+    execFileSync('bash', ['-c', validateMode.run], { env: { ...process.env, MODE: mode }, stdio: 'pipe' })
+    return { failed: false, stdout: '' }
+  } catch (e) {
+    return { failed: true, stdout: String(e.stdout ?? '') }
+  }
+}
+
+test('Validate mode is the first step, ungated, and accepts publish/teardown', () => {
+  assert.ok(validateMode, 'a step named "Validate mode" must exist')
+  assert.equal(action.runs.steps[0], validateMode, 'it must run before setup-node / npm ci')
+  assert.equal(validateMode.if, undefined)
+  assert.equal(runValidateMode('publish').failed, false)
+  assert.equal(runValidateMode('teardown').failed, false)
+})
+
+test('Validate mode rejects anything else', () => {
+  for (const bad of ['Teardown', 'PUBLISH', 'delete', '']) {
+    const { failed, stdout } = runValidateMode(bad)
+    assert.equal(failed, true, `mode "${bad}" should fail validation`)
+    assert.match(stdout, /::error::input `mode` must be "publish" or "teardown"/)
+  }
 })
 
 test('every ${{ inputs.X }} names a declared input', () => {

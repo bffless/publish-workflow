@@ -3,57 +3,56 @@
  * Tear down a preview implementation: the inverse of `attach.mjs`, plus deleting the
  * preview's own alias and rule set.
  *
- * Order, each step tolerating "already gone" so a re-run is a no-op:
- *   1. GET the harness project's aliases and find the PREVIEW alias (named `<alias>`).
- *      Not found → nothing to do, resolve without any write.
- *   2. PATCH the harness alias with its `proxyRuleSetIds` MINUS every id the preview
- *      alias carries (no write when none of them were present — mirrors `attach.mjs`'s
- *      PATCH-free no-op).
- *   3. DELETE the preview alias (`DELETE /api/repo/:owner/:repo/aliases/:name` → 204;
- *      404 tolerated).
- *   4. For every id the preview alias carried: GET `/api/proxy-rule-sets/:id` to confirm
- *      its `name` is `<alias>` — refuse otherwise, never delete a set that merely shares
- *      an id with this alias in a stale aliases list — then DELETE it (404 tolerated; a
- *      409, the project's default rule set, is a hard error rather than tolerated).
+ * The ids to delete are the UNION of two sources, each name-verified before deletion:
+ *   - the preview alias's own `proxyRuleSetIds` (the common case — publish attached one
+ *     set there), and
+ *   - every id currently on the HARNESS alias's `proxyRuleSetIds` that turns out to be
+ *     named `<alias>` — a recovery sweep. A prior teardown can fail between deleting the
+ *     alias and deleting its rule set (or someone can delete the alias by hand), which
+ *     would otherwise strand an orphaned `<alias>` set on the harness forever: with the
+ *     preview alias gone, its `proxyRuleSetIds` can no longer be read to find that set.
+ *     CE has no project-scoped "rule sets by name" route reachable without a projectId
+ *     (and no `/api/projects/:owner/:name` route either), so the harness alias's own
+ *     union is the only index available — hence sweeping it here.
+ * Each id is verify-GETted at most once even if it appears in both sources (the common
+ * case, since publish put it in both places).
  *
- * CE contract (apps/backend/src/repo-browser/repo-browser.controller.ts,
- * apps/backend/src/proxy-rules/proxy-rule-sets.controller.ts):
- *   GET    /api/repo/:owner/:repo/aliases              → { repository, aliases: [AliasDetailDto] }
- *   PATCH  /api/repo/:owner/:repo/aliases/:aliasName   ← { proxyRuleSetIds: string[] }
- *   DELETE /api/repo/:owner/:repo/aliases/:aliasName   → 204; 404 when absent
- *   GET    /api/proxy-rule-sets/:id                    → { name, ... }; 404 when absent
- *   DELETE /api/proxy-rule-sets/:id                    → 200 { success: true }; 404 when
- *                                                          absent; 409 when it is the
- *                                                          project's default rule set
+ * Order, each step tolerating "already gone" so a re-run (including one that resumes a
+ * partial prior failure) finishes the cleanup rather than erroring:
+ *   1. GET the harness project's aliases; find the HARNESS alias (throw if missing — see
+ *      below) and the PREVIEW alias (tolerated if missing).
+ *   2. Verify-GET every candidate id (from both sources above); refuse if a PREVIEW-owned
+ *      id turns out not to be named `<alias>` (never delete a set that doesn't belong to
+ *      this preview); silently drop a harness-swept id that isn't (it belongs to some
+ *      other implementation).
+ *   3. PATCH the harness alias with its `proxyRuleSetIds` MINUS every verified id (no
+ *      write when nothing changes).
+ *   4. DELETE the preview alias, if it still exists (`DELETE .../aliases/:name` → 204;
+ *      404 tolerated).
+ *   5. DELETE every verified id (404 tolerated; a 409 — the project's default rule set —
+ *      is a hard error rather than tolerated).
+ *
+ * A missing HARNESS alias is a hard error (mirrors `attach.mjs`): a typo'd
+ * `harness-alias` must not silently no-op a teardown that looks like it succeeded.
  *
  * Refuses to run at all unless `alias` looks like a preview alias
  * (`^[a-z][a-z0-9-]*-pr-[0-9]+$`) or `preview: true` is passed: the contributor-role key
  * can repoint any alias on the harness project, and a typo must not tear down production.
  */
-import { pathToFileURL } from 'node:url'
+import {
+  findAliasOrThrow,
+  isMainModule,
+  parseArgs,
+  request,
+  requestTolerant404,
+  ruleSetIdsOf,
+  splitRepository,
+  withoutIds,
+} from './lib.mjs'
+
+export { withoutIds }
 
 const PREVIEW_ALIAS_RE = /^[a-z][a-z0-9-]*-pr-[0-9]+$/
-
-/** Remove `id` if present; order of the remainder is preserved. Inverse of `unionIds`. */
-export function withoutIds(existing, id) {
-  const ids = Array.isArray(existing) ? [...existing] : []
-  return ids.filter((x) => x !== id)
-}
-
-/** The join table is authoritative; fall back to the legacy scalar for a pre-0.2.0 row. */
-function idsOf(alias) {
-  if (!alias) return []
-  if (Array.isArray(alias.proxyRuleSetIds) && alias.proxyRuleSetIds.length > 0) return alias.proxyRuleSetIds
-  return alias.proxyRuleSetId ? [alias.proxyRuleSetId] : []
-}
-
-function splitRepository(repository) {
-  const parts = String(repository ?? '').split('/')
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(`repository "${repository}" is not owner/name`)
-  }
-  return parts
-}
 
 function assertPreviewOrOptIn(alias, preview) {
   if (preview) return
@@ -62,26 +61,6 @@ function assertPreviewOrOptIn(alias, preview) {
     `alias "${alias}" does not look like a preview alias (expected ${PREVIEW_ALIAS_RE}); ` +
       'pass preview: true to tear down a non-preview alias anyway.',
   )
-}
-
-async function request(fetchImpl, url, init) {
-  const res = await fetchImpl(url, init)
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`${init?.method ?? 'GET'} ${url} failed: ${res.status} ${res.statusText} ${body}`.trim())
-  }
-  return res
-}
-
-/** Like `request`, but a 404 means "already gone" rather than an error. */
-async function requestTolerant404(fetchImpl, url, init) {
-  const res = await fetchImpl(url, init)
-  if (res.status === 404) return { res, gone: true }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`${init?.method ?? 'GET'} ${url} failed: ${res.status} ${res.statusText} ${body}`.trim())
-  }
-  return { res, gone: false }
 }
 
 /**
@@ -110,17 +89,45 @@ export async function teardown({
   const list = await listRes.json()
   const aliases = list?.aliases ?? []
 
+  const harness = findAliasOrThrow(
+    aliases,
+    harnessAlias,
+    repository,
+    'Create it (the harness deploy owns it) before tearing down a preview.',
+  )
   const previewAlias = aliases.find((a) => a?.name === alias)
-  if (!previewAlias) {
-    // Already gone (or never existed) — a re-run of this action must not error.
-    return { detached: false, deletedAlias: false, deletedRuleSet: false }
-  }
-  const idsToRemove = idsOf(previewAlias)
+  const before = ruleSetIdsOf(harness)
+  const previewIds = ruleSetIdsOf(previewAlias)
 
-  // 1. Detach every id the preview owns from the harness union.
-  const harness = aliases.find((a) => a?.name === harnessAlias)
-  const before = idsOf(harness)
-  const after = idsToRemove.reduce((acc, id) => withoutIds(acc, id), before)
+  // Verify-GET each candidate id at most once.
+  const cache = new Map() // id -> { name, ... } | null (null = already gone)
+  const verify = async (id) => {
+    if (cache.has(id)) return cache.get(id)
+    const setUrl = `${base}/api/proxy-rule-sets/${encodeURIComponent(id)}`
+    const { res, gone } = await requestTolerant404(fetchImpl, setUrl, { method: 'GET', headers })
+    const entry = gone ? null : await res.json()
+    cache.set(id, entry)
+    return entry
+  }
+
+  const idsToDelete = new Set()
+  for (const id of previewIds) {
+    const set = await verify(id)
+    if (set === null) continue // already gone
+    if (set.name !== alias) {
+      throw new Error(
+        `refusing to delete rule set ${id}: named "${set.name}", not "${alias}" — it does not belong to this preview`,
+      )
+    }
+    idsToDelete.add(id)
+  }
+  for (const id of before) {
+    const set = await verify(id)
+    if (set !== null && set.name === alias) idsToDelete.add(id)
+  }
+
+  // 1. Detach every id-to-delete from the harness union.
+  const after = before.filter((id) => !idsToDelete.has(id))
   let detached = false
   if (after.length !== before.length) {
     await request(fetchImpl, `${listUrl}/${encodeURIComponent(harnessAlias)}`, {
@@ -131,45 +138,25 @@ export async function teardown({
     detached = true
   }
 
-  // 2. Delete the preview alias.
-  const { gone: aliasGone } = await requestTolerant404(fetchImpl, `${listUrl}/${encodeURIComponent(alias)}`, {
-    method: 'DELETE',
-    headers,
-  })
-  const deletedAlias = !aliasGone
+  // 2. Delete the preview alias, if it still exists.
+  let deletedAlias = false
+  if (previewAlias) {
+    const { gone } = await requestTolerant404(fetchImpl, `${listUrl}/${encodeURIComponent(alias)}`, {
+      method: 'DELETE',
+      headers,
+    })
+    deletedAlias = !gone
+  }
 
-  // 3. Delete every rule set the preview alias carried, after confirming each one is
-  //    actually named `<alias>` — the aliases list can be stale, and an id must never
-  //    be trusted blind.
+  // 3. Delete every verified rule set.
   let deletedRuleSet = false
-  for (const id of idsToRemove) {
+  for (const id of idsToDelete) {
     const setUrl = `${base}/api/proxy-rule-sets/${encodeURIComponent(id)}`
-    const { res: getRes, gone: setGone } = await requestTolerant404(fetchImpl, setUrl, { method: 'GET', headers })
-    if (setGone) continue
-    const set = await getRes.json()
-    if (set?.name !== alias) {
-      throw new Error(
-        `refusing to delete rule set ${id}: named "${set?.name}", not "${alias}" — it does not belong to this preview`,
-      )
-    }
-    const { gone: deleteGone } = await requestTolerant404(fetchImpl, setUrl, { method: 'DELETE', headers })
-    if (!deleteGone) deletedRuleSet = true
+    const { gone } = await requestTolerant404(fetchImpl, setUrl, { method: 'DELETE', headers })
+    if (!gone) deletedRuleSet = true
   }
 
   return { detached, deletedAlias, deletedRuleSet }
-}
-
-/** Minimal `--flag value` parser — no deps, no clever aliasing. */
-function parseArgs(argv) {
-  const out = {}
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (!a.startsWith('--')) throw new Error(`unexpected argument: ${a}`)
-    const value = argv[++i]
-    if (value === undefined) throw new Error(`${a} needs a value`)
-    out[a.slice(2)] = value
-  }
-  return out
 }
 
 export async function main(argv, env = process.env, out = console.log) {
@@ -191,7 +178,7 @@ export async function main(argv, env = process.env, out = console.log) {
   return result
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2)).catch((e) => {
     console.error(`publish-workflow: ${e.message}`)
     process.exitCode = 1

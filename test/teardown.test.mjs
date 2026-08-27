@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { withoutIds, teardown } from '../scripts/teardown.mjs'
+import { withoutIds, teardown, main } from '../scripts/teardown.mjs'
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -40,10 +40,10 @@ test('withoutIds removes an id once; no-op when absent', () => {
   assert.deepEqual(withoutIds(undefined, 'z'), [])
 })
 
-test('teardown detaches from the harness, deletes the alias, then deletes the rule set, in order', async () => {
+test('teardown verifies the id, detaches from the harness, deletes the alias, then deletes the rule set, in order', async () => {
   const { calls, fetchImpl } = stub({
     aliases: [
-      { name: 'workflow', proxyRuleSetIds: ['a', 'rs1'] },
+      { name: 'workflow', proxyRuleSetIds: ['rs1'] },
       { name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] },
     ],
     ruleSets: { rs1: { id: 'rs1', name: 'hello-pr-12' } },
@@ -61,22 +61,50 @@ test('teardown detaches from the harness, deletes the alias, then deletes the ru
   assert.equal(calls[0][0], 'https://x/api/repo/o/n/aliases')
   assert.equal(calls[0][1], 'GET')
 
-  assert.equal(calls[1][0], 'https://x/api/repo/o/n/aliases/workflow')
-  assert.equal(calls[1][1], 'PATCH')
-  assert.deepEqual(JSON.parse(calls[1][2]), { proxyRuleSetIds: ['a'] })
+  // rs1 is on both the preview alias and the harness union — it must be verified once.
+  assert.equal(calls[1][0], 'https://x/api/proxy-rule-sets/rs1')
+  assert.equal(calls[1][1], 'GET')
 
-  assert.equal(calls[2][0], 'https://x/api/repo/o/n/aliases/hello-pr-12')
-  assert.equal(calls[2][1], 'DELETE')
+  assert.equal(calls[2][0], 'https://x/api/repo/o/n/aliases/workflow')
+  assert.equal(calls[2][1], 'PATCH')
+  assert.deepEqual(JSON.parse(calls[2][2]), { proxyRuleSetIds: [] })
 
-  assert.equal(calls[3][0], 'https://x/api/proxy-rule-sets/rs1')
-  assert.equal(calls[3][1], 'GET')
+  assert.equal(calls[3][0], 'https://x/api/repo/o/n/aliases/hello-pr-12')
+  assert.equal(calls[3][1], 'DELETE')
 
   assert.equal(calls[4][0], 'https://x/api/proxy-rule-sets/rs1')
   assert.equal(calls[4][1], 'DELETE')
+
+  assert.equal(calls.length, 5, 'rs1 must be verify-GETted only once despite appearing in both sources')
+  for (const [, , , headers] of calls) {
+    assert.equal(headers['X-API-Key'], 'k', 'every request must carry X-API-Key')
+  }
 })
 
-test('a second run finds no such preview alias — no writes, resolves cleanly', async () => {
-  const { calls, fetchImpl } = stub({ aliases: [{ name: 'workflow', proxyRuleSetIds: ['a'] }] })
+test('recovery sweep: preview alias already gone, but the harness still carries a set named <alias> — PATCH minus it + DELETE it, no alias DELETE', async () => {
+  const { calls, fetchImpl } = stub({
+    aliases: [{ name: 'workflow', proxyRuleSetIds: ['rs1'] }],
+    ruleSets: { rs1: { id: 'rs1', name: 'hello-pr-12' } },
+  })
+  const result = await teardown({
+    apiUrl: 'https://x',
+    apiKey: 'k',
+    repository: 'o/n',
+    harnessAlias: 'workflow',
+    alias: 'hello-pr-12',
+    fetchImpl,
+  })
+  assert.deepEqual(result, { detached: true, deletedAlias: false, deletedRuleSet: true })
+  assert.ok(!calls.some(([url, method]) => method === 'DELETE' && url.includes('/aliases/')), 'no alias DELETE')
+  assert.ok(calls.some(([url, method]) => method === 'PATCH' && url.endsWith('/aliases/workflow')))
+  assert.ok(calls.some(([url, method]) => method === 'DELETE' && url.endsWith('/proxy-rule-sets/rs1')))
+})
+
+test('nothing anywhere: one GET on aliases plus the per-id verify GETs, no writes, exit 0', async () => {
+  const { calls, fetchImpl } = stub({
+    aliases: [{ name: 'workflow', proxyRuleSetIds: ['other'] }],
+    ruleSets: { other: { id: 'other', name: 'something-else-pr-3' } },
+  })
   const result = await teardown({
     apiUrl: 'https://x',
     apiKey: 'k',
@@ -86,8 +114,10 @@ test('a second run finds no such preview alias — no writes, resolves cleanly',
     fetchImpl,
   })
   assert.deepEqual(result, { detached: false, deletedAlias: false, deletedRuleSet: false })
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 2)
   assert.equal(calls[0][1], 'GET')
+  assert.equal(calls[1][1], 'GET')
+  assert.equal(calls[1][0], 'https://x/api/proxy-rule-sets/other')
 })
 
 test('refuses a non-preview alias without preview: true, before any request', async () => {
@@ -100,7 +130,7 @@ test('refuses a non-preview alias without preview: true, before any request', as
 })
 
 test('accepts a non-preview alias when preview: true is passed', async () => {
-  const { calls, fetchImpl } = stub({ aliases: [] })
+  const { calls, fetchImpl } = stub({ aliases: [{ name: 'workflow', proxyRuleSetIds: [] }] })
   const result = await teardown({
     apiUrl: 'https://x',
     apiKey: 'k',
@@ -114,7 +144,7 @@ test('accepts a non-preview alias when preview: true is passed', async () => {
   assert.equal(calls.length, 1)
 })
 
-test('refuses to delete a rule set whose name does not match the alias, before deleting it', async () => {
+test('refuses to delete a rule set whose name does not match the alias, before any write', async () => {
   const { calls, fetchImpl } = stub({
     aliases: [
       { name: 'workflow', proxyRuleSetIds: ['rs1'] },
@@ -126,8 +156,11 @@ test('refuses to delete a rule set whose name does not match the alias, before d
     teardown({ apiUrl: 'https://x', apiKey: 'k', repository: 'o/n', harnessAlias: 'workflow', alias: 'hello-pr-12', fetchImpl }),
     /something-else/,
   )
-  const deleteSetCalls = calls.filter(([url, method]) => method === 'DELETE' && url.includes('/proxy-rule-sets/'))
-  assert.equal(deleteSetCalls.length, 0)
+  // The mismatch is caught in the verify pass, before the PATCH/DELETE alias/DELETE set ever run.
+  assert.deepEqual(
+    calls.map(([, method]) => method),
+    ['GET', 'GET'],
+  )
 })
 
 test('skips the PATCH when the harness alias does not carry the id, but still deletes alias + set', async () => {
@@ -154,7 +187,10 @@ test('skips the PATCH when the harness alias does not carry the id, but still de
 
 test('tolerates the alias already being gone (404) when deleting it', async () => {
   const { fetchImpl } = stub({
-    aliases: [{ name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] }],
+    aliases: [
+      { name: 'workflow', proxyRuleSetIds: ['rs1'] },
+      { name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] },
+    ],
     ruleSets: { rs1: { id: 'rs1', name: 'hello-pr-12' } },
     deleteAliasStatus: 404,
   })
@@ -172,7 +208,10 @@ test('tolerates the alias already being gone (404) when deleting it', async () =
 
 test('tolerates the rule set already being gone (404 on the verify GET)', async () => {
   const { fetchImpl } = stub({
-    aliases: [{ name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] }],
+    aliases: [
+      { name: 'workflow', proxyRuleSetIds: ['rs1'] },
+      { name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] },
+    ],
     ruleSets: {},
   })
   const result = await teardown({
@@ -188,13 +227,24 @@ test('tolerates the rule set already being gone (404 on the verify GET)', async 
 
 test('treats a 409 deleting the rule set (project default) as a hard error', async () => {
   const { fetchImpl } = stub({
-    aliases: [{ name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] }],
+    aliases: [
+      { name: 'workflow', proxyRuleSetIds: ['rs1'] },
+      { name: 'hello-pr-12', proxyRuleSetIds: ['rs1'] },
+    ],
     ruleSets: { rs1: { id: 'rs1', name: 'hello-pr-12' } },
     deleteSetStatus: 409,
   })
   await assert.rejects(
     teardown({ apiUrl: 'https://x', apiKey: 'k', repository: 'o/n', harnessAlias: 'workflow', alias: 'hello-pr-12', fetchImpl }),
     /409/,
+  )
+})
+
+test('throws when the harness alias is not found (never silently masks a typo)', async () => {
+  const { fetchImpl } = stub({ aliases: [{ name: 'production', proxyRuleSetIds: [] }] })
+  await assert.rejects(
+    teardown({ apiUrl: 'https://x', apiKey: 'k', repository: 'o/n', harnessAlias: 'workflow', alias: 'hello-pr-12', fetchImpl }),
+    /harness alias "workflow" not found/,
   )
 })
 
@@ -212,4 +262,25 @@ test('teardown requires an api key', async () => {
     teardown({ apiUrl: 'https://x', apiKey: '', repository: 'o/n', harnessAlias: 'workflow', alias: 'hello-pr-12', fetchImpl }),
     /api key/i,
   )
+})
+
+test('main() emits key=value lines matching the action.yml teardown outputs', async () => {
+  const { fetchImpl } = stub({ aliases: [{ name: 'workflow', proxyRuleSetIds: [] }] })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fetchImpl
+  try {
+    const lines = []
+    await main(
+      ['--api-url', 'https://x', '--repository', 'o/n', '--harness-alias', 'workflow', '--alias', 'hello-pr-12'],
+      { BFFLESS_API_KEY: 'k' },
+      (line) => lines.push(line),
+    )
+    assert.deepEqual(
+      lines.map((l) => l.split('=')[0]),
+      ['detached', 'deleted-alias', 'deleted-rule-set'],
+    )
+    assert.deepEqual(lines, ['detached=false', 'deleted-alias=false', 'deleted-rule-set=false'])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })

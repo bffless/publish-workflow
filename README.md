@@ -83,7 +83,8 @@ that does not resolve as an error, so the publish exits 2 before anything is dep
 
 `target-url` above assumes the install maps `hello-pr-<n>.j5s.dev` to the preview alias.
 Nothing here creates that mapping — a preview alias is still fully discoverable and attached
-to the harness without one, which is what `mode: teardown` (below) cleans up.
+to the harness without one. What accumulates instead, and what `mode: teardown` (below)
+cleans up, are the preview alias itself, its rule set, and the harness attachment.
 
 ### Preview teardown (`mode: teardown`)
 
@@ -137,17 +138,25 @@ jobs:
           repository: bffless/workflow
 ```
 
-**Idempotent.** Every step tolerates "already gone": closing the same PR twice, or a
-teardown that runs after a manual cleanup, makes no write and exits 0.
+**Idempotent, including recovery from a partial failure.** Every step tolerates "already
+gone": closing the same PR twice makes no write and exits 0. If a prior run deleted the
+preview alias but then failed before deleting its rule set (or a manual cleanup did the
+same), the set would otherwise be stranded — its id lived only on the now-deleted alias.
+Teardown also sweeps the harness alias' own `proxyRuleSetIds` for any id that turns out to
+be named `<alias>`, so a re-run finds and finishes that cleanup rather than seeing nothing
+to do.
 
 **Refuses a non-preview alias.** `alias` must match `^[a-z][a-z0-9-]*-pr-[0-9]+$`, or the
 step fails **before making any request** — the API key's `contributor` role can repoint or
 delete any alias on the harness project, so a plain `alias: hello` (production) must not
 reach teardown by accident. To tear down a non-preview alias on purpose, pass `preview: true`.
 
-**Never deletes a rule set it didn't publish.** Before deleting a rule set, teardown
-re-fetches it and confirms its `name` matches `alias`; a mismatch refuses rather than
-deleting.
+**Never deletes a rule set it didn't publish.** Before deleting anything, teardown
+re-fetches every candidate rule set (the preview alias' own ids, plus — for the recovery
+sweep above — every id the harness alias carries) and checks its `name` against `alias`.
+A set the preview alias itself pointed at that turns out to be named something else
+refuses the whole run rather than deleting it; a harness-swept id that doesn't match is
+simply left alone (it belongs to some other implementation).
 
 ## Inputs
 
@@ -210,8 +219,9 @@ npm ci
 npm test        # node --test; no vitest, no build step
 ```
 
-`scripts/prepare-rules.mjs` and `scripts/attach.mjs` are plain ESM with one runtime
-dependency (`yaml`); `scripts/teardown.mjs` has none. The composite runs
+`scripts/lib.mjs` holds the plumbing `attach.mjs` and `teardown.mjs` share (the CE aliases
+contract, `request`/`parseArgs`/`isMainModule`). `scripts/prepare-rules.mjs` is the only one
+with a runtime dependency (`yaml`); the rest of `scripts/` has none. The composite runs
 `npm ci --omit=dev` in `$GITHUB_ACTION_PATH` before calling any of them. There is no
 `dist/` to keep in sync.
 

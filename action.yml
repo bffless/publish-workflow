@@ -95,6 +95,19 @@ outputs:
 runs:
   using: composite
   steps:
+    # Ungated (runs whatever `mode` is) so a typo like `mode: Teardown` fails loudly here
+    # instead of every later step's `if:` silently skipping it — a green no-op run.
+    - name: Validate mode
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          publish|teardown) ;;
+          *) echo "::error::input \`mode\` must be \"publish\" or \"teardown\" (got \"$MODE\")"; exit 1 ;;
+        esac
+
     - uses: actions/setup-node@v4
       with:
         node-version: '20'
