@@ -194,8 +194,13 @@ simply left alone (it belongs to some other implementation).
 This action publishes an implementation. Standing the **harness** up on a domain is a
 one-time setup it deliberately does not touch:
 
-- **Domain → alias.** Point the domain at the harness alias with base path `/`. There is no
-  API-driven step here yet; do it in the BFFless dashboard.
+- **Domain → alias.** The **implementation** alias's domain path is `/<path>` (the
+  action's `path` input, default `/dist`), not `/` — `bffless/upload-artifact` keeps the
+  uploaded directory name as the bundle's root, so a domain path of `/` (or empty) 400s
+  (double slash) or 404s instead of serving it. The **harness** alias's domain path is
+  whatever the harness's own deploy uploads — outside this action's scope, and not
+  necessarily `/dist`; match whatever directory that deploy's own `upload-artifact` step
+  names. There is no API-driven step here yet for either; do it in the BFFless dashboard.
 - **Two `no-transform` response-header rules.** Cloudflare Bot Fight Mode injects a script
   into every `text/html` response, which makes island HTML fetched and injected into a
   `srcdoc` throw `SecurityError`. Until [bffless/ce#700](https://github.com/bffless/ce/issues/700)
