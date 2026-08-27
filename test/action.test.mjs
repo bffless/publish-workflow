@@ -16,21 +16,28 @@ const action = parse(readFileSync(fileURLToPath(new URL('../action.yml', import.
 test('declares the documented inputs, with the documented defaults', () => {
   assert.deepEqual(Object.keys(action.inputs).sort(), [
     'alias', 'api-key', 'api-url', 'description', 'harness-alias', 'lint-version',
-    'name', 'path', 'prune', 'repository', 'rules', 'target-url', 'workflows',
+    'mode', 'name', 'path', 'preview', 'prune', 'repository', 'rules', 'target-url', 'workflows',
   ])
-  for (const required of ['alias', 'api-url', 'api-key', 'repository', 'target-url']) {
+  for (const required of ['alias', 'api-url', 'api-key', 'repository']) {
     assert.equal(action.inputs[required].required, true, `${required} must be required`)
   }
+  // target-url is unused in teardown mode, so it is no longer required at the action level —
+  // the "Resolve inputs" step enforces it for publish mode instead.
+  assert.equal(action.inputs['target-url'].required, false)
   assert.equal(action.inputs.path.default, 'dist')
   assert.equal(action.inputs.workflows.default, '.bffless/workflows')
   assert.equal(action.inputs['harness-alias'].default, 'workflow')
   assert.equal(action.inputs.prune.default, 'true')
   // @bffless/workflow-lint is published at 1.0.0.
   assert.equal(action.inputs['lint-version'].default, '^1.0.0')
+  assert.equal(action.inputs.mode.default, 'publish')
+  assert.equal(action.inputs.preview.default, 'false')
 })
 
 test('declares the documented outputs', () => {
-  assert.deepEqual(Object.keys(action.outputs).sort(), ['deployment-id', 'index', 'rule-set-id'])
+  assert.deepEqual(Object.keys(action.outputs).sort(), [
+    'deleted-alias', 'deleted-rule-set', 'deployment-id', 'detached', 'index', 'rule-set-id',
+  ])
 })
 
 test('is a composite action whose steps run in publish order', () => {
@@ -61,6 +68,58 @@ test('every ${{ steps.X.outputs.Y }} names a step declared earlier', () => {
   check(JSON.stringify(action.outputs), 'outputs')
 })
 
+test('the teardown step runs only in teardown mode; every other step (but Validate mode, setup-node and npm ci) runs only in publish mode', () => {
+  const alwaysOn = new Set(['Validate mode', 'actions/setup-node@v4', 'Install action deps'])
+  for (const step of action.runs.steps) {
+    const label = step.name ?? step.uses
+    if (alwaysOn.has(label)) {
+      assert.equal(step.if, undefined, `"${label}" must not be gated on mode`)
+      continue
+    }
+    if (step.id === 'teardown') {
+      assert.equal(step.if, "inputs.mode == 'teardown'", `"${label}" must be gated on teardown mode`)
+    } else {
+      assert.equal(step.if, "inputs.mode == 'publish'", `"${label}" must be gated on publish mode`)
+    }
+  }
+})
+
+test('the teardown step calls scripts/teardown.mjs with the api key in the environment, never argv', () => {
+  const step = action.runs.steps.find((s) => s.id === 'teardown')
+  assert.ok(step, 'a step with id "teardown" must exist')
+  assert.equal(step.env.BFFLESS_API_KEY, '${{ inputs.api-key }}')
+  assert.doesNotMatch(step.run, /--api-key/)
+  assert.match(step.run, /teardown\.mjs/)
+  assert.match(step.run, />> "\$GITHUB_OUTPUT"/)
+})
+
+// An unrecognised `mode` must fail loudly rather than silently no-op every gated step.
+const validateMode = action.runs.steps.find((s) => s.name === 'Validate mode')
+const runValidateMode = (mode) => {
+  try {
+    execFileSync('bash', ['-c', validateMode.run], { env: { ...process.env, MODE: mode }, stdio: 'pipe' })
+    return { failed: false, stdout: '' }
+  } catch (e) {
+    return { failed: true, stdout: String(e.stdout ?? '') }
+  }
+}
+
+test('Validate mode is the first step, ungated, and accepts publish/teardown', () => {
+  assert.ok(validateMode, 'a step named "Validate mode" must exist')
+  assert.equal(action.runs.steps[0], validateMode, 'it must run before setup-node / npm ci')
+  assert.equal(validateMode.if, undefined)
+  assert.equal(runValidateMode('publish').failed, false)
+  assert.equal(runValidateMode('teardown').failed, false)
+})
+
+test('Validate mode rejects anything else', () => {
+  for (const bad of ['Teardown', 'PUBLISH', 'delete', '']) {
+    const { failed, stdout } = runValidateMode(bad)
+    assert.equal(failed, true, `mode "${bad}" should fail validation`)
+    assert.match(stdout, /::error::input `mode` must be "publish" or "teardown"/)
+  }
+})
+
 test('every ${{ inputs.X }} names a declared input', () => {
   const declared = new Set(Object.keys(action.inputs))
   for (const [, name] of JSON.stringify(action.runs).matchAll(/\$\{\{\s*inputs\.([\w-]+)\s*\}\}/g)) {
@@ -81,7 +140,10 @@ test('never interpolates an input straight into a run: script', () => {
 const cfg = action.runs.steps.find((s) => s.id === 'cfg')
 const runCfg = (env) => {
   const out = join(mkdtempSync(join(tmpdir(), 'publish-workflow-cfg-')), 'out')
-  const base = { ALIAS: 'hello', RULES: '', NAME: '', OUT: 'dist', WORKFLOWS: '.bffless/workflows', DESCRIPTION: '' }
+  const base = {
+    ALIAS: 'hello', RULES: '', NAME: '', OUT: 'dist', WORKFLOWS: '.bffless/workflows',
+    DESCRIPTION: '', TARGET_URL: 'https://hello.j5s.dev',
+  }
   try {
     execFileSync('bash', ['-c', cfg.run], {
       env: { ...process.env, ...base, ...env, GITHUB_OUTPUT: out },
@@ -97,6 +159,13 @@ test('Resolve inputs writes the derived defaults', () => {
   const { failed, file } = runCfg({ DESCRIPTION: 'A demo' })
   assert.equal(failed, false)
   assert.equal(file, 'rules=.bffless/proxy-rules/hello\nname=hello\nindex=dist/.bffless/workflows/index.json\n')
+})
+
+test('Resolve inputs rejects an empty target-url', () => {
+  const { failed, stdout, file } = runCfg({ TARGET_URL: '' })
+  assert.equal(failed, true)
+  assert.match(stdout, /::error::input `target-url` is required/)
+  assert.equal(file, '')
 })
 
 test('Resolve inputs rejects a newline in any guarded input', () => {
