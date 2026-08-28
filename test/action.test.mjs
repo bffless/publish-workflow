@@ -15,15 +15,20 @@ const action = parse(readFileSync(fileURLToPath(new URL('../action.yml', import.
 
 test('declares the documented inputs, with the documented defaults', () => {
   assert.deepEqual(Object.keys(action.inputs).sort(), [
-    'alias', 'api-key', 'api-url', 'description', 'harness-alias', 'lint-version',
+    'alias', 'api-key', 'api-url', 'backend-url', 'description', 'harness-alias', 'lint-version',
     'mode', 'name', 'path', 'preview', 'prune', 'repository', 'rules', 'target-url', 'workflows',
   ])
   for (const required of ['alias', 'api-url', 'api-key', 'repository']) {
     assert.equal(action.inputs[required].required, true, `${required} must be required`)
   }
-  // target-url is unused in teardown mode, so it is no longer required at the action level —
-  // the "Resolve inputs" step enforces it for publish mode instead.
+  // target-url is now a full override of the in-process default (below), and unused in
+  // teardown mode either way, so it stays optional at the action level.
   assert.equal(action.inputs['target-url'].required, false)
+  assert.equal(action.inputs['target-url'].default, '')
+  // backend-url is the CE backend's own address, as reachable from the backend itself —
+  // the forwarder is proxied in-process by the backend, not rendered into nginx — used
+  // to compute the default target-url.
+  assert.equal(action.inputs['backend-url'].default, 'http://localhost:3000')
   assert.equal(action.inputs.path.default, 'dist')
   assert.equal(action.inputs.workflows.default, '.bffless/workflows')
   assert.equal(action.inputs['harness-alias'].default, 'workflow')
@@ -36,7 +41,7 @@ test('declares the documented inputs, with the documented defaults', () => {
 
 test('declares the documented outputs', () => {
   assert.deepEqual(Object.keys(action.outputs).sort(), [
-    'deleted-alias', 'deleted-rule-set', 'deployment-id', 'detached', 'index', 'rule-set-id',
+    'deleted-alias', 'deleted-rule-set', 'deployment-id', 'detached', 'index', 'rule-set-id', 'target-url',
   ])
 })
 
@@ -142,7 +147,7 @@ const runCfg = (env) => {
   const out = join(mkdtempSync(join(tmpdir(), 'publish-workflow-cfg-')), 'out')
   const base = {
     ALIAS: 'hello', RULES: '', NAME: '', OUT: 'dist', WORKFLOWS: '.bffless/workflows',
-    DESCRIPTION: '', TARGET_URL: 'https://hello.j5s.dev',
+    DESCRIPTION: '', TARGET_URL: '', BACKEND_URL: 'http://localhost:3000', REPOSITORY: 'bffless/workflow',
   }
   try {
     execFileSync('bash', ['-c', cfg.run], {
@@ -155,24 +160,63 @@ const runCfg = (env) => {
   return { failed: false, stdout: '', file: readFileSync(out, 'utf8') }
 }
 
-test('Resolve inputs writes the derived defaults', () => {
+test('Resolve inputs writes the derived defaults, including the in-process target-url', () => {
   const { failed, file } = runCfg({ DESCRIPTION: 'A demo' })
   assert.equal(failed, false)
-  assert.equal(file, 'rules=.bffless/proxy-rules/hello\nname=hello\nindex=dist/.bffless/workflows/index.json\n')
+  assert.equal(
+    file,
+    'rules=.bffless/proxy-rules/hello\nname=hello\nindex=dist/.bffless/workflows/index.json\n' +
+      'target-url=http://localhost:3000/public/bffless/workflow/alias/hello/dist\n',
+  )
 })
 
-test('Resolve inputs rejects an empty target-url', () => {
-  const { failed, stdout, file } = runCfg({ TARGET_URL: '' })
-  assert.equal(failed, true)
-  assert.match(stdout, /::error::input `target-url` is required/)
-  assert.equal(file, '')
+test('Resolve inputs computes the in-process target-url for a preview alias', () => {
+  const { failed, file } = runCfg({ ALIAS: 'hello-pr-12' })
+  assert.equal(failed, false)
+  assert.match(file, /target-url=http:\/\/localhost:3000\/public\/bffless\/workflow\/alias\/hello-pr-12\/dist\n/)
+})
+
+test('Resolve inputs keeps an explicit target-url verbatim, never recomputing it', () => {
+  const { failed, file } = runCfg({ TARGET_URL: 'https://hello.j5s.dev' })
+  assert.equal(failed, false)
+  assert.match(file, /target-url=https:\/\/hello\.j5s\.dev\n/)
+})
+
+test('Resolve inputs uses a nested path AS GIVEN for the in-process target-url, not its basename', () => {
+  // bffless/upload-artifact zips with the given `path` as the prefix (src/zip.ts:
+  // archive.directory(resolvedPath, buildPath)), so the bundle root on the alias is the
+  // full path, not its last segment — out/bundle serves at .../out/bundle/, not .../bundle/.
+  const { failed, file } = runCfg({ OUT: 'out/bundle' })
+  assert.equal(failed, false)
+  assert.match(file, /target-url=http:\/\/localhost:3000\/public\/bffless\/workflow\/alias\/hello\/out\/bundle\n/)
+  assert.match(file, /index=out\/bundle\/\.bffless\/workflows\/index\.json\n/)
+})
+
+test('Resolve inputs strips a leading ./ and trailing / from path before composing target-url', () => {
+  const { failed, file } = runCfg({ OUT: './dist/' })
+  assert.equal(failed, false)
+  assert.match(file, /target-url=http:\/\/localhost:3000\/public\/bffless\/workflow\/alias\/hello\/dist\n/)
+})
+
+test('Resolve inputs strips a trailing / from backend-url before composing target-url', () => {
+  const { failed, file } = runCfg({ BACKEND_URL: 'http://localhost:3000/' })
+  assert.equal(failed, false)
+  assert.doesNotMatch(file, /\/\/public/)
+  assert.match(file, /target-url=http:\/\/localhost:3000\/public\/bffless\/workflow\/alias\/hello\/dist\n/)
 })
 
 test('Resolve inputs rejects a newline in any guarded input', () => {
-  for (const key of ['ALIAS', 'RULES', 'NAME', 'OUT', 'WORKFLOWS', 'DESCRIPTION']) {
+  for (const key of ['ALIAS', 'RULES', 'NAME', 'OUT', 'WORKFLOWS', 'DESCRIPTION', 'TARGET_URL', 'BACKEND_URL', 'REPOSITORY']) {
     const { failed, stdout, file } = runCfg({ [key]: 'evil\nindex=/etc/passwd' })
     assert.equal(failed, true, `${key} with a newline should fail the step`)
-    assert.match(stdout, /::error::input `[a-z]+` must not contain a newline/)
+    assert.match(stdout, /::error::input `[a-z-]+` must not contain a newline/)
     assert.equal(file, '', `${key} must not have written any output`)
   }
+})
+
+test('the "Prepare the rule set" step reads the resolved target-url, not the raw input', () => {
+  // inputs.target-url is blank whenever the default applies — the step must read the
+  // step-computed value, or the forwarder would be pushed with an empty targetUrl.
+  const step = action.runs.steps.find((s) => s.id === 'prepare')
+  assert.equal(step.env.TARGET_URL, '${{ steps.cfg.outputs.target-url }}')
 })
