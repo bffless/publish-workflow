@@ -10,7 +10,6 @@ every implementation repo has to do identically, so no repo re-derives them.
     api-url: https://j5s.dev
     api-key: ${{ secrets.BFFLESS_API_KEY }}
     repository: bffless/workflow
-    target-url: https://hello.j5s.dev
 ```
 
 ## What it does
@@ -30,8 +29,9 @@ The obligations are spec'd in `apps/workflow/docs/spec/06-discovery-publishing-f
 3. **Sync the rule set** — `bffless/deploy-proxy-rules@v1` pushes the set as **`<alias>`**
    with every *derived* rule path rewritten under `/api/<alias>/`. Before pushing, this
    action stages a copy of the set under `$RUNNER_TEMP` and (a) rewrites `ruleset.yaml`'s
-   `name:` to the alias and (b) generates the **`/w/<alias>/*` forwarder** with
-   `targetUrl: <target-url>`. Your checkout is never modified.
+   `name:` to the alias and (b) generates the **`/w/<alias>/*` forwarder**, `targetUrl:`
+   resolved by the "Resolve inputs" step — the alias served in-process by the CE backend
+   by default, or your `target-url` override. Your checkout is never modified.
 4. **Deploy** — `bffless/upload-artifact@v1` uploads `path` to alias `<alias>` with
    `base-path: /` and attaches the `<alias>` rule set to that alias by name.
 5. **Attach to the harness alias** — `PATCH /api/repo/<owner>/<repo>/aliases/<harness-alias>`
@@ -50,9 +50,23 @@ same-origin: `/w/<alias>/*` on the harness → your alias. This action generates
 source set must **not** contain `rules/_custom/forward` (it refuses if it does, rather than
 silently overwriting a hand-authored rule).
 
-`targetUrl` is a per-install value today — hence the required `target-url` input. Once
-[bffless/ce#698](https://github.com/bffless/ce/issues/698) lands `targetUrl: alias://<impl>`
-the input becomes optional and the rule becomes declarative.
+By default the forwarder's `targetUrl` points at the alias **in-process** on the CE
+backend — `<backend-url>/public/<owner>/<repo>/alias/<alias>/<path input, as given>` (a
+rule without `authTransform` is never rendered into nginx; it's forwarded in-process by
+the backend itself, so `http://localhost:3000` — `backend-url`'s default — is the CE
+backend's own address, right for every CE install). No domain, no per-install hostname,
+and it works for previews with nothing extra. Pass an explicit `target-url` to override
+this and forward to a real domain instead — the legacy per-install mode, useful when you
+want the implementation alias browsable on its own host.
+[bffless/ce#698](https://github.com/bffless/ce/issues/698) — `targetUrl: alias://<impl>` —
+remains a nice-to-have that would make the rule declarative instead of a resolved URL, not
+a blocker.
+
+**Caveat: signed-out requests through the forwarder.** If the harness project's
+`unauthorizedBehavior` is `redirect_login`, a signed-out request hitting the forwarder
+gets a 302 whose `Location` is derived from the backend-local request (not the harness's
+public host) — surprising if you were expecting a redirect back to the harness. The
+default, `not_found` (a 404), is what the harness expects and needs no special handling.
 
 The forwarder carries an **explicit** `pathPattern:`, which `--path-prefix` never rewrites
 (the CE CLI prefixes only *derived* patterns), so `/w/<alias>/*` survives the sync verbatim.
@@ -78,13 +92,13 @@ that does not resolve as an error, so the publish exits 2 before anything is dep
     api-url: https://j5s.dev
     api-key: ${{ secrets.BFFLESS_API_KEY }}
     repository: bffless/workflow
-    target-url: https://hello-pr-${{ github.event.number }}.j5s.dev
 ```
 
-`target-url` above assumes the install maps `hello-pr-<n>.j5s.dev` to the preview alias.
-Nothing here creates that mapping — a preview alias is still fully discoverable and attached
-to the harness without one. What accumulates instead, and what `mode: teardown` (below)
-cleans up, are the preview alias itself, its rule set, and the harness attachment.
+No `target-url` needed: the forwarder defaults to the preview alias served in-process by
+the CE backend, so nothing here has to map a domain to it. A preview alias is still fully
+discoverable and attached to the harness with zero domain setup. What accumulates instead,
+and what `mode: teardown` (below) cleans up, are the preview alias itself, its rule set,
+and the harness attachment.
 
 ### Preview teardown (`mode: teardown`)
 
@@ -123,7 +137,6 @@ jobs:
           api-url: https://j5s.dev
           api-key: ${{ secrets.BFFLESS_API_KEY }}
           repository: bffless/workflow
-          target-url: https://hello-pr-${{ github.event.number }}.j5s.dev
 
   teardown:
     if: github.event.action == 'closed'
@@ -167,7 +180,8 @@ simply left alone (it belongs to some other implementation).
 | `api-url` | yes | — | Base URL of the BFFless instance, e.g. `https://j5s.dev`. |
 | `api-key` | yes | — | API key (`X-API-Key`). Needs a **project role** on the harness project — see below. |
 | `repository` | yes | — | The **harness** project, `owner/name`. The alias and the rule set are created there. |
-| `target-url` | no | — | The implementation alias host the forwarder points at, e.g. `https://hello.j5s.dev`. Required in publish mode until bffless/ce#698; unused in teardown mode. |
+| `target-url` | no | — | Override the forwarder's target, e.g. `https://hello.j5s.dev` (the legacy per-domain mode). Default: the alias served in-process on `backend-url`. Unused in teardown mode. |
+| `backend-url` | no | `http://localhost:3000` | The CE backend's own address, as reachable from the backend itself (the forwarder is proxied in-process by the backend, not rendered into nginx). Used to compute the default `target-url`; ignored when `target-url` is set. Publish mode only. |
 | `path` | no | `dist` | Built bundle directory; also `workflow index --out`. Publish mode only. |
 | `workflows` | no | `.bffless/workflows` | Directory of authored workflow YAML. Publish mode only. |
 | `rules` | no | `.bffless/proxy-rules/<alias>` | The implementation's rule-set directory (contains `ruleset.yaml`). Publish mode only. |
@@ -185,6 +199,7 @@ simply left alone (it belongs to some other implementation).
 | `rule-set-id` | Publish mode: the synced rule set ID (comma-separated if the set expanded to several). |
 | `deployment-id` | Publish mode: the deployment ID of the uploaded bundle. |
 | `index` | Publish mode: path of the written `index.json` (`<path>/.bffless/workflows/index.json`). |
+| `target-url` | Publish mode: the resolved forwarder target — your `target-url` override, or the computed in-process default. |
 | `detached` | Teardown mode: whether the harness alias was detached from the preview rule set. |
 | `deleted-alias` | Teardown mode: whether the preview alias was deleted. |
 | `deleted-rule-set` | Teardown mode: whether the preview rule set was deleted. |
@@ -194,11 +209,14 @@ simply left alone (it belongs to some other implementation).
 This action publishes an implementation. Standing the **harness** up on a domain is a
 one-time setup it deliberately does not touch:
 
-- **Domain → alias.** The **implementation** alias's domain path is `/<path>` (the
-  action's `path` input, default `/dist`), not `/` — `bffless/upload-artifact` keeps the
-  uploaded directory name as the bundle's root, so a domain path of `/` (or empty) 400s
-  (double slash) or 404s instead of serving it. The **harness** alias's domain path is
-  whatever the harness's own deploy uploads — outside this action's scope, and not
+- **Domain → alias.** A domain for the **implementation** alias is now **optional** — the
+  forwarder targets it in-process by default (above), so a domain here is purely cosmetic,
+  letting a human browse the implementation host directly; previews need none at all. If
+  you do add one, its domain path is `/<path>` (the action's `path` input, default
+  `/dist`), not `/` — `bffless/upload-artifact` keeps the uploaded directory name as the
+  bundle's root, so a domain path of `/` (or empty) 400s (double slash) or 404s instead of
+  serving it. The **harness** alias's domain, by contrast, is not optional — its domain
+  path is whatever the harness's own deploy uploads, outside this action's scope, and not
   necessarily `/dist`; match whatever directory that deploy's own `upload-artifact` step
   names. There is no API-driven step here yet for either; do it in the BFFless dashboard.
 - **Two `no-transform` response-header rules.** Cloudflare Bot Fight Mode injects a script

@@ -28,10 +28,22 @@ inputs:
     required: true
   target-url:
     description: >-
-      The implementation alias host the /w/<alias>/* forwarder points at, e.g.
-      https://hello.j5s.dev. Required in publish mode until bffless/ce#698 lands
-      `targetUrl: alias://`. Unused in teardown mode.
+      Override the implementation alias target the /w/<alias>/* forwarder points at, e.g.
+      https://hello.j5s.dev. By default the forwarder targets the alias in-process on the
+      CE backend (see backend-url) — no domain required, for production or previews. Set
+      this to forward to a real domain instead (the legacy per-domain mode). Unused in
+      teardown mode.
     required: false
+    default: ''
+  backend-url:
+    description: >-
+      The CE backend's own address, as reachable from the backend itself — the
+      /w/<alias>/* forwarder is proxied in-process by the backend (it is never rendered
+      into nginx), so http://localhost:3000 is right for every CE install. Used to
+      compute the default target-url (the alias served in-process); ignored when
+      target-url is set explicitly, and unused in teardown mode.
+    required: false
+    default: 'http://localhost:3000'
   path:
     description: 'Built bundle directory (also the --out of `workflow index`)'
     required: false
@@ -82,6 +94,9 @@ outputs:
   index:
     description: 'Path of the written index.json'
     value: ${{ steps.cfg.outputs.index }}
+  target-url:
+    description: 'Publish mode: the resolved forwarder target (an explicit override, or the in-process default)'
+    value: ${{ steps.cfg.outputs.target-url }}
   detached:
     description: 'Teardown mode: whether the harness alias was detached from the preview rule set'
     value: ${{ steps.teardown.outputs.detached }}
@@ -131,14 +146,10 @@ runs:
         WORKFLOWS: ${{ inputs.workflows }}
         DESCRIPTION: ${{ inputs.description }}
         TARGET_URL: ${{ inputs.target-url }}
+        BACKEND_URL: ${{ inputs.backend-url }}
+        REPOSITORY: ${{ inputs.repository }}
       run: |
         set -euo pipefail
-        # target-url is not `required:` at the action level any more (teardown mode does
-        # not need it), so publish mode must check for itself.
-        if [ -z "$TARGET_URL" ]; then
-          echo "::error::input \`target-url\` is required when mode is publish"
-          exit 1
-        fi
         # $GITHUB_OUTPUT is line-oriented, so a newline inside a value would let that value
         # forge further `key=value` lines. Reject one outright rather than sanitising it —
         # none of these inputs has a legitimate multi-line form.
@@ -153,10 +164,29 @@ runs:
         reject_newline path "$OUT"
         reject_newline workflows "$WORKFLOWS"
         reject_newline description "$DESCRIPTION"
+        reject_newline target-url "$TARGET_URL"
+        reject_newline backend-url "$BACKEND_URL"
+        reject_newline repository "$REPOSITORY"
+        # An explicit target-url is a full override, used verbatim. Empty means the
+        # forwarder targets the alias in-process on the CE backend — no domain per
+        # install or per preview. bffless/upload-artifact zips with the given `path` as
+        # the prefix (src/zip.ts: archive.directory(resolvedPath, buildPath)) — the
+        # bundle root on the alias is `path` AS GIVEN, not its basename, so out/bundle
+        # serves at .../out/bundle/, not .../bundle/.
+        if [ -n "$TARGET_URL" ]; then
+          RESOLVED_TARGET_URL="$TARGET_URL"
+        else
+          CLEAN_BACKEND_URL="${BACKEND_URL%/}"
+          CLEAN_REPOSITORY="${REPOSITORY%/}"
+          CLEAN_OUT="${OUT#./}"
+          CLEAN_OUT="${CLEAN_OUT%/}"
+          RESOLVED_TARGET_URL="$CLEAN_BACKEND_URL/public/$CLEAN_REPOSITORY/alias/$ALIAS/$CLEAN_OUT"
+        fi
         {
           echo "rules=${RULES:-.bffless/proxy-rules/$ALIAS}"
           echo "name=${NAME:-$ALIAS}"
           echo "index=$OUT/.bffless/workflows/index.json"
+          echo "target-url=$RESOLVED_TARGET_URL"
         } >> "$GITHUB_OUTPUT"
 
     # A failing lint is never published: `index` writes the bundle only when every
@@ -186,7 +216,7 @@ runs:
       env:
         RULES: ${{ steps.cfg.outputs.rules }}
         ALIAS: ${{ inputs.alias }}
-        TARGET_URL: ${{ inputs.target-url }}
+        TARGET_URL: ${{ steps.cfg.outputs.target-url }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
