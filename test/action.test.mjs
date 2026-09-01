@@ -60,17 +60,33 @@ test('declares the documented inputs, with the documented defaults', () => {
   assert.equal(action.inputs.path.default, 'dist')
   assert.equal(action.inputs.workflows.default, '.bffless/workflows')
   assert.equal(action.inputs.rules.default, '')
-  // @bffless/workflow is published at 1.0.0.
-  assert.equal(action.inputs['workflow-version'].default, '^1.0.0')
+  assert.equal(action.inputs.name.default, '')
+  assert.equal(action.inputs.description.default, '')
+  // 1.1.0 is the floor: the release that added `publish --name` / `--description`
+  // (bffless/apps#569), which the name/description inputs are mapped onto.
+  assert.equal(action.inputs['workflow-version'].default, '^1.1.0')
   assert.equal(action.inputs.mode.default, 'publish')
   assert.equal(action.inputs.preview.default, 'false')
+})
+
+test('name and description are ordinary supported inputs, not guarded ones', () => {
+  // They were blocked when v2 was first written (`workflow publish` had no flags for
+  // them); bffless/apps#569 added both, so they are carried through again with v1's
+  // semantics — name defaulting to the alias, description to absent, both CLI-side.
+  for (const supported of ['name', 'description']) {
+    assert.doesNotMatch(action.inputs[supported].description, /REMOVED in v2/)
+    assert.ok(
+      !step('Reject inputs v2 cannot carry').env[supported.toUpperCase()],
+      `${supported} must not be read by the removed-input guard`,
+    )
+  }
 })
 
 test('the v1 inputs v2 cannot carry are still declared, so setting one fails loudly', () => {
   // Removing them outright would only make GitHub warn ("Unexpected input(s)") and run
   // anyway — silently changing what gets published. Each is declared with its v1 default
   // so an *unset* one is indistinguishable from absent, and guarded by the step below.
-  for (const removed of ['name', 'description', 'target-url', 'lint-version']) {
+  for (const removed of ['target-url', 'lint-version']) {
     assert.equal(action.inputs[removed].default, '', `${removed} must default to empty`)
     assert.match(action.inputs[removed].description, /REMOVED in v2/)
   }
@@ -177,8 +193,7 @@ test('Validate mode rejects anything else', () => {
 // Reject inputs v2 cannot carry
 
 const REJECT_DEFAULTS = {
-  NAME: '', DESCRIPTION: '', TARGET_URL: '', BACKEND_URL: 'http://localhost:3000',
-  PRUNE: 'true', LINT_VERSION: '',
+  TARGET_URL: '', BACKEND_URL: 'http://localhost:3000', PRUNE: 'true', LINT_VERSION: '',
 }
 const runReject = (env) => runStep('Reject inputs v2 cannot carry', { ...REJECT_DEFAULTS, ...env })
 
@@ -188,8 +203,6 @@ test('the v1 defaults for the removed inputs pass the guard untouched', () => {
 
 test('each removed input fails the run, naming itself', () => {
   const cases = [
-    [{ NAME: 'Hello' }, /input `name` was removed in v2/],
-    [{ DESCRIPTION: 'A demo' }, /input `description` was removed in v2/],
     [{ TARGET_URL: 'https://hello.j5s.dev' }, /input `target-url` was removed in v2/],
     [{ BACKEND_URL: 'http://ce:3000' }, /input `backend-url` was removed in v2/],
     [{ PRUNE: 'false' }, /input `prune` was removed in v2/],
@@ -205,8 +218,8 @@ test('each removed input fails the run, naming itself', () => {
 
 test('every removed input is reported in one run, not one per re-run', () => {
   // A migration wants the whole list at once; failing on the first would make the user
-  // re-run the workflow six times to find them all.
-  const { failed, stdout } = runReject({ NAME: 'Hello', DESCRIPTION: 'A demo', PRUNE: 'false' })
+  // re-run the workflow once per offending input to find them all.
+  const { failed, stdout } = runReject({ TARGET_URL: 'https://x.j5s.dev', PRUNE: 'false', LINT_VERSION: '^1.0.0' })
   assert.equal(failed, true)
   assert.equal(stdout.match(/::error::/g).length, 3)
 })
@@ -338,9 +351,9 @@ function stubNpx() {
 }
 
 const PUBLISH_DEFAULTS = {
-  BFFLESS_API_KEY: 'secret', WORKFLOW_VERSION: '^1.0.0', API_URL: 'https://j5s.dev',
+  BFFLESS_API_KEY: 'secret', WORKFLOW_VERSION: '^1.1.0', API_URL: 'https://j5s.dev',
   REPOSITORY: 'bffless/workflow', ALIAS: 'hello', HARNESS_ALIAS: 'workflow', OUT: 'dist',
-  WORKFLOWS: '.bffless/workflows', RULES: '',
+  WORKFLOWS: '.bffless/workflows', RULES: '', NAME: '', DESCRIPTION: '',
 }
 
 function runPublish(env = {}) {
@@ -350,25 +363,44 @@ function runPublish(env = {}) {
 }
 
 test('the publish step invokes the pinned CLI with every input mapped to its flag', () => {
-  const { failed, argv } = runPublish()
+  const { failed, argv } = runPublish({
+    RULES: '.bffless/proxy-rules/hello',
+    NAME: 'Hello World',
+    DESCRIPTION: 'A demo implementation.',
+  })
   assert.equal(failed, false)
   assert.deepEqual(argv, [
-    '--yes', '@bffless/workflow@^1.0.0', 'publish',
+    '--yes', '@bffless/workflow@^1.1.0', 'publish',
     '--api-url', 'https://j5s.dev',
     '--project', 'bffless/workflow',
     '--alias', 'hello',
     '--harness-alias', 'workflow',
     '--path', 'dist',
     '--workflows', '.bffless/workflows',
+    '--rules', '.bffless/proxy-rules/hello',
+    '--name', 'Hello World',
+    '--description', 'A demo implementation.',
   ])
 })
 
-test('the publish step omits --rules entirely when the input is blank', () => {
-  // `--rules ''` is a usage error in the CLI, not "use the default" — and the CLI's own
-  // default (.bffless/proxy-rules/<alias>) is the one this action documented in v1.
-  assert.ok(!runPublish().argv.includes('--rules'))
-  const withRules = runPublish({ RULES: '.bffless/proxy-rules/hello' }).argv
-  assert.equal(withRules[withRules.indexOf('--rules') + 1], '.bffless/proxy-rules/hello')
+test('the publish step omits --rules / --name / --description when the input is blank', () => {
+  // Each has a CLI-side default that is exactly what v1 resolved in its own step
+  // (.bffless/proxy-rules/<alias>, the alias, and absent respectively), and passing
+  // `--rules ''` would be a usage error rather than "use the default".
+  const argv = runPublish().argv
+  for (const flag of ['--rules', '--name', '--description']) {
+    assert.ok(!argv.includes(flag), `${flag} must be omitted, not passed empty`)
+  }
+})
+
+test('the publish step passes a multi-word name/description as one argument each', () => {
+  // They reach the step through env: and the array through "$NAME", so a value with
+  // spaces (every real display name) must not word-split into extra argv entries.
+  const argv = runPublish({ NAME: 'Hello World', DESCRIPTION: 'One line; two words.' }).argv
+  assert.equal(argv[argv.indexOf('--name') + 1], 'Hello World')
+  assert.equal(argv[argv.indexOf('--description') + 1], 'One line; two words.')
+  // npx + spec + verb + 6 always-on flag pairs + the two pairs above; nothing split.
+  assert.equal(argv.length, 3 + 12 + 4)
 })
 
 test('the publish step passes the api key only through the environment', () => {

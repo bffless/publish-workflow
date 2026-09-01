@@ -17,10 +17,10 @@ the preview lifecycle, and a loud failure when you ask for something the CLI can
 
 No `alias:` — it comes from the implementation's own `.bffless/workflow.json`.
 
-> **v2 is not shippable yet.** `workflow publish` has no `--name` / `--description`, so the
-> `name`/`description` inputs cannot be carried through and this action refuses them rather
-> than dropping them silently. Until the CLI grows those flags, an implementation that sets
-> either one must stay on `@v1`. See [Migrating from v1](#migrating-from-v1).
+> **v2 needs `@bffless/workflow` >= 1.1.0**, the release that added
+> `publish --name` / `--description` ([bffless/apps#569](https://github.com/bffless/apps/pull/569)) —
+> the `workflow-version` default (`^1.1.0`) already pins that floor. Narrow it below 1.1.0
+> and those two inputs become a usage error inside the CLI.
 
 ## What it does
 
@@ -38,7 +38,9 @@ The obligations are spec'd in `apps/workflow/docs/spec/06-discovery-publishing-f
      generated `index.json` the harness reads) and a landing `index.html`. **A failing lint
      fails the publish** — the linter's `rule-missing` check holds every relative
      `with.path` / `poll.path` to the rule that will serve it, so a typo on either side is
-     caught here instead of as a run-time 404.
+     caught here instead of as a run-time 404. `name` and `description` land in that
+     `index.json` (the Implementations screen reads them) via the CLI's
+     `--name` / `--description`.
    - **prepare** — stages a copy of the rule set under a temp dir, rewrites `ruleset.yaml`'s
      `name:` to the alias, and generates the **`/w/<alias>/*` forwarder** (below). Your
      checkout is never modified.
@@ -203,9 +205,8 @@ simply left alone (it belongs to some other implementation).
 | `alias` | **now optional** | Defaults to `.bffless/workflow.json`'s `alias`. Still required in teardown mode, and still worth passing explicitly for a preview. |
 | `harness-alias` (default `workflow`) | **default is now the identity file** | `.bffless/workflow.json`'s `harness`, falling back to `workflow` when there is no identity file. |
 | `mode`, `api-url`, `api-key`, `repository`, `path`, `workflows`, `rules`, `preview` | unchanged | — |
+| `name`, `description` | unchanged | Mapped to the CLI's `--name` / `--description` ([bffless/apps#569](https://github.com/bffless/apps/pull/569), `@bffless/workflow` 1.1.0). Same defaults as v1 — `name` falls back to the alias, `description` to absent — resolved CLI-side now rather than in this action's own step. |
 | `lint-version` | **removed** → use `workflow-version` | The linter is now an internal dependency of `@bffless/workflow`; what you pin is the CLI. |
-| `name` | **removed — fails the run** | `workflow publish` has no `--name`. The value would be dropped from `index.json` and the Implementations screen would show the alias instead. **Blocked on the CLI.** |
-| `description` | **removed — fails the run** | `workflow publish` has no `--description`; same silent-drop. **Blocked on the CLI.** |
 | `target-url` | **removed — fails the run** | `workflow publish` always forwards in-process. Need a real domain? Stay on `@v1`. |
 | `backend-url` | **removed — fails a non-default value** | `workflow publish` pins `http://localhost:3000`. |
 | `prune` | **removed — `prune: false` fails the run** | `workflow publish` always passes `--prune`; accepting `false` and pruning anyway would be the worst kind of silent. |
@@ -257,9 +258,11 @@ Other behaviour differences worth knowing:
 | `workflows` | no | `.bffless/workflows` | Directory of authored workflow YAML. Its parent also locates the identity file. |
 | `rules` | no | `.bffless/proxy-rules/<alias>` | The implementation's rule-set directory (contains `ruleset.yaml`). Publish mode only. |
 | `harness-alias` | no | the identity file's `harness`, else `workflow` | The alias carrying the union of implementation rule sets. |
-| `workflow-version` | no | `^1.0.0` | npm range for `@bffless/workflow`, the CLI this action wraps. |
+| `name` | no | the alias | Display name on the Implementations screen. Publish mode only. |
+| `description` | no | — | One line about the bundle. Publish mode only. |
+| `workflow-version` | no | `^1.1.0` | npm range for `@bffless/workflow`, the CLI this action wraps. **1.1.0 is the floor** — the release carrying `publish --name`/`--description`. |
 | `preview` | no | `false` | Teardown mode only: opt in to tearing down an alias that does not match the preview grammar. |
-| `name`, `description`, `target-url`, `backend-url`, `prune`, `lint-version` | no | v1's defaults | **Removed in v2** — declared only so that setting one fails loudly. See [Migrating from v1](#migrating-from-v1). |
+| `target-url`, `backend-url`, `prune`, `lint-version` | no | v1's defaults | **Removed in v2** — declared only so that setting one fails loudly. See [Migrating from v1](#migrating-from-v1). |
 
 ## Outputs
 

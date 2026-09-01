@@ -52,10 +52,22 @@ inputs:
       the identity file's `harness`, and to "workflow" when there is no identity file.
     required: false
     default: ''
-  workflow-version:
-    description: 'npm range for @bffless/workflow, the CLI this action wraps'
+  name:
+    description: 'Display name on the Implementations screen (default: the alias)'
     required: false
-    default: '^1.0.0'
+    default: ''
+  description:
+    description: 'One line about the bundle, shown on the Implementations screen'
+    required: false
+    default: ''
+  workflow-version:
+    description: >-
+      npm range for @bffless/workflow, the CLI this action wraps. The floor is 1.1.0 —
+      the release that added `publish --name` / `--description` (bffless/apps#569), which
+      the `name` and `description` inputs above are mapped onto. Narrowing this below
+      1.1.0 makes those two inputs a usage error inside the CLI.
+    required: false
+    default: '^1.1.0'
   preview:
     description: >-
       Teardown mode only: opt in to tearing down an alias that does not match the
@@ -68,15 +80,9 @@ inputs:
   # These are declared ONLY so a v1 caller that sets one fails loudly on upgrade. Dropping
   # them outright would make GitHub emit a warning and run anyway, silently changing what
   # gets published (`prune: false` most dangerously of all). Each one disappears from this
-  # list the moment `@bffless/workflow publish` grows the flag behind it.
-  name:
-    description: 'REMOVED in v2 — `workflow publish` has no --name; setting it fails the run.'
-    required: false
-    default: ''
-  description:
-    description: 'REMOVED in v2 — `workflow publish` has no --description; setting it fails the run.'
-    required: false
-    default: ''
+  # list the moment `@bffless/workflow publish` grows the flag behind it — as `name` and
+  # `description` already did (bffless/apps#569, @bffless/workflow 1.1.0); they are ordinary
+  # supported inputs above now.
   target-url:
     description: 'REMOVED in v2 — `workflow publish` always forwards in-process; setting it fails the run.'
     required: false
@@ -138,8 +144,6 @@ runs:
       if: inputs.mode == 'publish'
       shell: bash
       env:
-        NAME: ${{ inputs.name }}
-        DESCRIPTION: ${{ inputs.description }}
         TARGET_URL: ${{ inputs.target-url }}
         BACKEND_URL: ${{ inputs.backend-url }}
         PRUNE: ${{ inputs.prune }}
@@ -149,12 +153,6 @@ runs:
         FAILED=0
         fail() { echo "::error::$1"; FAILED=1; }
         SEE='See the v1 → v2 migration table in this action'"'"'s README.'
-        if [ -n "$NAME" ]; then
-          fail "input \`name\` was removed in v2: \`workflow publish\` has no --name, so the display name would be dropped from index.json and the Implementations screen would show the alias instead. Blocked on the CLI; stay on @v1 until it lands. $SEE"
-        fi
-        if [ -n "$DESCRIPTION" ]; then
-          fail "input \`description\` was removed in v2: \`workflow publish\` has no --description, so the line would be dropped from index.json. Blocked on the CLI; stay on @v1 until it lands. $SEE"
-        fi
         if [ -n "$TARGET_URL" ]; then
           fail "input \`target-url\` was removed in v2: \`workflow publish\` always points the /w/<alias>/* forwarder at the alias served in-process by the CE backend. To forward to a real domain instead, stay on @v1. $SEE"
         fi
@@ -273,6 +271,8 @@ runs:
         OUT: ${{ inputs.path }}
         WORKFLOWS: ${{ inputs.workflows }}
         RULES: ${{ inputs.rules }}
+        NAME: ${{ inputs.name }}
+        DESCRIPTION: ${{ inputs.description }}
       run: |
         set -euo pipefail
         args=(publish
@@ -282,9 +282,14 @@ runs:
           --harness-alias "$HARNESS_ALIAS"
           --path "$OUT"
           --workflows "$WORKFLOWS")
-        # Omitted, not empty: the CLI's own default is .bffless/proxy-rules/<alias>, and
-        # `--rules ''` would be a usage error rather than "use the default".
+        # Omitted, not empty. Each of these three has a CLI-side default that is exactly
+        # what v1 resolved here (rules -> .bffless/proxy-rules/<alias>, name -> the alias,
+        # description -> absent), and passing `--rules ''` would be a usage error rather
+        # than "use the default". --name/--description need @bffless/workflow >= 1.1.0
+        # (bffless/apps#569); see the `workflow-version` input.
         if [ -n "$RULES" ]; then args+=(--rules "$RULES"); fi
+        if [ -n "$NAME" ]; then args+=(--name "$NAME"); fi
+        if [ -n "$DESCRIPTION" ]; then args+=(--description "$DESCRIPTION"); fi
         npx --yes "@bffless/workflow@$WORKFLOW_VERSION" "${args[@]}"
 
     # Teardown stays in-repo: preview lifecycle is CI's concern, and the CLI deliberately
