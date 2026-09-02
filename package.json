@@ -1,6 +1,6 @@
 {
   "name": "publish-workflow",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "Composite GitHub Action that publishes a BFFless Workflow implementation",
@@ -11,7 +11,7 @@
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
-  "dependencies": {
+  "devDependencies": {
     "yaml": "^2.8.0"
   }
 }

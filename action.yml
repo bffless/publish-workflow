@@ -1,8 +1,8 @@
 name: 'Publish a BFFless Workflow implementation'
 description: >-
-  Lint + index the workflows, sync the rule set under /api/<alias>/ with a generated
-  /w/<alias>/ forwarder, deploy the bundle to alias <alias>, and attach the set to the
-  harness alias.
+  Publish an implementation with `npx @bffless/workflow publish` (index → prepare the
+  alias-named rule set + /w/<alias>/ forwarder → rules push → deploy + attach), or tear a
+  preview down. The alias defaults to the implementation's .bffless/workflow.json.
 author: 'bffless'
 
 branding:
@@ -15,8 +15,14 @@ inputs:
     required: false
     default: 'publish'
   alias:
-    description: 'The implementation alias, e.g. "hello". Lowercase, letter-initial, hyphenated.'
-    required: true
+    description: >-
+      The implementation alias, e.g. "hello". Lowercase, letter-initial, hyphenated.
+      Optional in publish mode: it defaults to the `alias` in the identity file beside the
+      workflows directory (`<dirname of workflows>/workflow.json`, i.e. the standard
+      `.bffless/workflow.json`). Required in teardown mode — the alias to delete is a
+      preview (`<impl>-pr-<n>`), never the production alias the identity file names.
+    required: false
+    default: ''
   api-url:
     description: 'Base URL of the BFFless instance, e.g. https://j5s.dev'
     required: true
@@ -26,30 +32,14 @@ inputs:
   repository:
     description: 'The harness project, owner/name — where the alias and rule set live'
     required: true
-  target-url:
-    description: >-
-      Override the implementation alias target the /w/<alias>/* forwarder points at, e.g.
-      https://hello.j5s.dev. By default the forwarder targets the alias in-process on the
-      CE backend (see backend-url) — no domain required, for production or previews. Set
-      this to forward to a real domain instead (the legacy per-domain mode). Unused in
-      teardown mode.
-    required: false
-    default: ''
-  backend-url:
-    description: >-
-      The CE backend's own address, as reachable from the backend itself — the
-      /w/<alias>/* forwarder is proxied in-process by the backend (it is never rendered
-      into nginx), so http://localhost:3000 is right for every CE install. Used to
-      compute the default target-url (the alias served in-process); ignored when
-      target-url is set explicitly, and unused in teardown mode.
-    required: false
-    default: 'http://localhost:3000'
   path:
-    description: 'Built bundle directory (also the --out of `workflow index`)'
+    description: 'Built bundle directory (also the --path of `workflow publish`)'
     required: false
     default: 'dist'
   workflows:
-    description: 'Directory of authored workflow YAML'
+    description: >-
+      Directory of authored workflow YAML. Its parent also locates the identity file
+      (`<dirname>/workflow.json`) the `alias`/`harness-alias` defaults are read from.
     required: false
     default: '.bffless/workflows'
   rules:
@@ -57,9 +47,11 @@ inputs:
     required: false
     default: ''
   harness-alias:
-    description: 'The harness alias that carries the union of implementation rule sets'
+    description: >-
+      The harness alias that carries the union of implementation rule sets. Defaults to
+      the identity file's `harness`, and to "workflow" when there is no identity file.
     required: false
-    default: 'workflow'
+    default: ''
   name:
     description: 'Display name on the Implementations screen (default: the alias)'
     required: false
@@ -68,14 +60,14 @@ inputs:
     description: 'One line about the bundle, shown on the Implementations screen'
     required: false
     default: ''
-  prune:
-    description: 'Delete rules/schemas on the server that are absent from source'
+  workflow-version:
+    description: >-
+      npm range for @bffless/workflow, the CLI this action wraps. The floor is 1.1.0 —
+      the release that added `publish --name` / `--description` (bffless/apps#569), which
+      the `name` and `description` inputs above are mapped onto. Narrowing this below
+      1.1.0 makes those two inputs a usage error inside the CLI.
     required: false
-    default: 'true'
-  lint-version:
-    description: 'npm range for @bffless/workflow-lint'
-    required: false
-    default: '^1.0.0'
+    default: '^1.1.0'
   preview:
     description: >-
       Teardown mode only: opt in to tearing down an alias that does not match the
@@ -84,19 +76,40 @@ inputs:
     required: false
     default: 'false'
 
-outputs:
-  rule-set-id:
-    description: 'The synced rule set ID (comma-separated if the set expanded to several)'
-    value: ${{ steps.rules.outputs.rule-set-ids }}
-  deployment-id:
-    description: 'The deployment ID of the uploaded bundle'
-    value: ${{ steps.upload.outputs.deployment-id }}
-  index:
-    description: 'Path of the written index.json'
-    value: ${{ steps.cfg.outputs.index }}
+  # --- v1 inputs the wrapped CLI cannot carry (see "Reject inputs v2 cannot carry") ---
+  # These are declared ONLY so a v1 caller that sets one fails loudly on upgrade. Dropping
+  # them outright would make GitHub emit a warning and run anyway, silently changing what
+  # gets published (`prune: false` most dangerously of all). Each one disappears from this
+  # list the moment `@bffless/workflow publish` grows the flag behind it — as `name` and
+  # `description` already did (bffless/apps#569, @bffless/workflow 1.1.0); they are ordinary
+  # supported inputs above now.
   target-url:
-    description: 'Publish mode: the resolved forwarder target (an explicit override, or the in-process default)'
-    value: ${{ steps.cfg.outputs.target-url }}
+    description: 'REMOVED in v2 — `workflow publish` always forwards in-process; setting it fails the run.'
+    required: false
+    default: ''
+  backend-url:
+    description: 'REMOVED in v2 — `workflow publish` pins http://localhost:3000; changing it fails the run.'
+    required: false
+    default: 'http://localhost:3000'
+  prune:
+    description: 'REMOVED in v2 — `workflow publish` always prunes; `prune: false` fails the run.'
+    required: false
+    default: 'true'
+  lint-version:
+    description: 'REMOVED in v2 — the linter is pinned by @bffless/workflow; use `workflow-version`.'
+    required: false
+    default: ''
+
+outputs:
+  alias:
+    description: 'The resolved implementation alias (the input, or the identity file''s)'
+    value: ${{ steps.cfg.outputs.alias }}
+  harness-alias:
+    description: 'The resolved harness alias (the input, the identity file''s `harness`, or "workflow")'
+    value: ${{ steps.cfg.outputs.harness-alias }}
+  index:
+    description: 'Publish mode: path of the written index.json'
+    value: ${{ steps.cfg.outputs.index }}
   detached:
     description: 'Teardown mode: whether the harness alias was detached from the preview rule set'
     value: ${{ steps.teardown.outputs.detached }}
@@ -123,31 +136,56 @@ runs:
           *) echo "::error::input \`mode\` must be \"publish\" or \"teardown\" (got \"$MODE\")"; exit 1 ;;
         esac
 
+    # v2 publishes through `npx @bffless/workflow publish`, whose flag list (README
+    # "publish — index, prepare, sync, deploy, attach") has no counterpart for these. A
+    # value set here would be accepted and then have no effect, so refuse it instead:
+    # a failed run with a message beats a bundle that quietly says the wrong thing.
+    - name: Reject inputs v2 cannot carry
+      if: inputs.mode == 'publish'
+      shell: bash
+      env:
+        TARGET_URL: ${{ inputs.target-url }}
+        BACKEND_URL: ${{ inputs.backend-url }}
+        PRUNE: ${{ inputs.prune }}
+        LINT_VERSION: ${{ inputs.lint-version }}
+      run: |
+        set -euo pipefail
+        FAILED=0
+        fail() { echo "::error::$1"; FAILED=1; }
+        SEE='See the v1 → v2 migration table in this action'"'"'s README.'
+        if [ -n "$TARGET_URL" ]; then
+          fail "input \`target-url\` was removed in v2: \`workflow publish\` always points the /w/<alias>/* forwarder at the alias served in-process by the CE backend. To forward to a real domain instead, stay on @v1. $SEE"
+        fi
+        if [ "$BACKEND_URL" != 'http://localhost:3000' ]; then
+          fail "input \`backend-url\` was removed in v2: \`workflow publish\` pins the backend's own address to http://localhost:3000. $SEE"
+        fi
+        if [ "$PRUNE" != 'true' ]; then
+          fail "input \`prune\` was removed in v2: \`workflow publish\` always passes --prune to \`bffless rules push\`, so \`prune: false\` would prune anyway. $SEE"
+        fi
+        if [ -n "$LINT_VERSION" ]; then
+          fail "input \`lint-version\` was removed in v2: the linter version is pinned by @bffless/workflow itself. Pin the CLI with \`workflow-version\` instead. $SEE"
+        fi
+        [ "$FAILED" = 0 ] || exit 1
+
     - uses: actions/setup-node@v4
       with:
         node-version: '20'
 
-    - name: Install action deps
-      shell: bash
-      working-directory: ${{ github.action_path }}
-      run: npm ci --omit=dev
-
-    # Defaults that depend on another input cannot live in `inputs.*.default`, so they are
-    # resolved once here and every later step reads the resolved value.
+    # Defaults that depend on another input — or on a file in the checkout — cannot live in
+    # `inputs.*.default`, so they are resolved once here and every later step reads the
+    # resolved value. Ungated: teardown needs the resolved harness alias too.
     - name: Resolve inputs
       id: cfg
-      if: inputs.mode == 'publish'
       shell: bash
       env:
+        MODE: ${{ inputs.mode }}
         ALIAS: ${{ inputs.alias }}
+        HARNESS_ALIAS: ${{ inputs.harness-alias }}
         RULES: ${{ inputs.rules }}
-        NAME: ${{ inputs.name }}
         OUT: ${{ inputs.path }}
         WORKFLOWS: ${{ inputs.workflows }}
-        DESCRIPTION: ${{ inputs.description }}
-        TARGET_URL: ${{ inputs.target-url }}
-        BACKEND_URL: ${{ inputs.backend-url }}
         REPOSITORY: ${{ inputs.repository }}
+        API_URL: ${{ inputs.api-url }}
       run: |
         set -euo pipefail
         # $GITHUB_OUTPUT is line-oriented, so a newline inside a value would let that value
@@ -159,113 +197,103 @@ runs:
           esac
         }
         reject_newline alias "$ALIAS"
+        reject_newline harness-alias "$HARNESS_ALIAS"
         reject_newline rules "$RULES"
-        reject_newline name "$NAME"
         reject_newline path "$OUT"
         reject_newline workflows "$WORKFLOWS"
-        reject_newline description "$DESCRIPTION"
-        reject_newline target-url "$TARGET_URL"
-        reject_newline backend-url "$BACKEND_URL"
         reject_newline repository "$REPOSITORY"
-        # An explicit target-url is a full override, used verbatim. Empty means the
-        # forwarder targets the alias in-process on the CE backend — no domain per
-        # install or per preview. bffless/upload-artifact zips with the given `path` as
-        # the prefix (src/zip.ts: archive.directory(resolvedPath, buildPath)) — the
-        # bundle root on the alias is `path` AS GIVEN, not its basename, so out/bundle
-        # serves at .../out/bundle/, not .../bundle/.
-        if [ -n "$TARGET_URL" ]; then
-          RESOLVED_TARGET_URL="$TARGET_URL"
-        else
-          CLEAN_BACKEND_URL="${BACKEND_URL%/}"
-          CLEAN_REPOSITORY="${REPOSITORY%/}"
-          CLEAN_OUT="${OUT#./}"
-          CLEAN_OUT="${CLEAN_OUT%/}"
-          RESOLVED_TARGET_URL="$CLEAN_BACKEND_URL/public/$CLEAN_REPOSITORY/alias/$ALIAS/$CLEAN_OUT"
+        reject_newline api-url "$API_URL"
+
+        # The identity file is `.bffless/workflow.json` — the SIBLING of `.bffless/workflows`.
+        # Deriving it from the `workflows` input (rather than assuming the checkout root)
+        # is what makes a nested implementation work: `workflow publish` reads the identity
+        # file relative to its own cwd, which here is always $GITHUB_WORKSPACE, so a package
+        # at packages/hello/ would never be found. Resolving it here and passing --alias
+        # explicitly means the CLI never has to look.
+        IDENTITY="$(dirname "$WORKFLOWS")/workflow.json"
+        ident() {
+          [ -f "$IDENTITY" ] || return 0
+          node -e 'const fs=require("node:fs");let id={};try{id=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{};const v=id[process.argv[2]];process.stdout.write(typeof v==="string"?v:"")' \
+            "$IDENTITY" "$1" 2>/dev/null || true
+        }
+
+        # Teardown never defaults the alias: the identity file names the PRODUCTION alias,
+        # and teardown deletes what it is given. An omitted alias must fail, not resolve.
+        if [ -z "$ALIAS" ] && [ "$MODE" = 'publish' ]; then ALIAS="$(ident alias)"; fi
+        [ -n "$HARNESS_ALIAS" ] || HARNESS_ALIAS="$(ident harness)"
+        [ -n "$HARNESS_ALIAS" ] || HARNESS_ALIAS='workflow'
+
+        if [ -z "$ALIAS" ]; then
+          if [ "$MODE" = 'teardown' ]; then
+            echo "::error::input \`alias\` is required in teardown mode — it names the preview to delete and is never defaulted from $IDENTITY (which names the production alias)"
+          else
+            echo "::error::input \`alias\` is required: it was not given and $IDENTITY does not exist or does not name a string \`alias\`. Pass \`alias:\`, or point \`workflows:\` at the implementation's own .bffless/workflows"
+          fi
+          exit 1
         fi
+
+        # Both values land in $GITHUB_OUTPUT and on the CLI's command line; the grammar
+        # (which an alias must satisfy anyway — it becomes a hostname label) also rules out
+        # every character that could forge an output line or a flag.
+        assert_alias() {
+          if ! [[ "$2" =~ ^[a-z][a-z0-9-]*$ ]]; then
+            echo "::error::$1 \"$2\" is not a valid alias: expected ^[a-z][a-z0-9-]*\$"
+            exit 1
+          fi
+        }
+        assert_alias alias "$ALIAS"
+        assert_alias harness-alias "$HARNESS_ALIAS"
+
         {
-          echo "rules=${RULES:-.bffless/proxy-rules/$ALIAS}"
-          echo "name=${NAME:-$ALIAS}"
+          echo "alias=$ALIAS"
+          echo "harness-alias=$HARNESS_ALIAS"
           echo "index=$OUT/.bffless/workflows/index.json"
-          echo "target-url=$RESOLVED_TARGET_URL"
         } >> "$GITHUB_OUTPUT"
 
-    # A failing lint is never published: `index` writes the bundle only when every
-    # workflow passes, and an explicit --rules that does not resolve exits 2.
-    - name: Lint + index the workflows
+    # The whole publish path, in one call: `workflow publish` runs index → prepare (the
+    # alias-named set + generated /w/<alias>/* forwarder) → `bffless rules push` → zip
+    # upload + attach to the harness alias. Its prepare/attach are ports of this action's
+    # own v1 scripts, behaviour-pinned against the fixtures this repo used to carry, so v2
+    # is a re-pointing rather than a re-implementation. A failing lint is never published.
+    - name: Publish the implementation
+      id: publish
       if: inputs.mode == 'publish'
       shell: bash
       env:
-        LINT_VERSION: ${{ inputs.lint-version }}
-        WORKFLOWS: ${{ inputs.workflows }}
-        OUT: ${{ inputs.path }}
-        ALIAS: ${{ inputs.alias }}
-        NAME: ${{ steps.cfg.outputs.name }}
-        DESCRIPTION: ${{ inputs.description }}
-        RULES: ${{ steps.cfg.outputs.rules }}
-        SHA: ${{ github.sha }}
-      run: |
-        set -euo pipefail
-        npx --yes "@bffless/workflow-lint@$LINT_VERSION" index "$WORKFLOWS" \
-          --out "$OUT" --impl "$ALIAS" --name "$NAME" --description "$DESCRIPTION" \
-          --rules "$RULES" --path-prefix "/api/$ALIAS" --commit "$SHA"
-
-    - name: Prepare the rule set (rename + forwarder)
-      id: prepare
-      if: inputs.mode == 'publish'
-      shell: bash
-      env:
-        RULES: ${{ steps.cfg.outputs.rules }}
-        ALIAS: ${{ inputs.alias }}
-        TARGET_URL: ${{ steps.cfg.outputs.target-url }}
-        ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        node "$ACTION_PATH/scripts/prepare-rules.mjs" --rules "$RULES" --alias "$ALIAS" \
-          --target-url "$TARGET_URL" --out "$RUNNER_TEMP/publish-workflow-rules/$ALIAS" \
-          >> "$GITHUB_OUTPUT"
-
-    - name: Sync the rule set
-      id: rules
-      if: inputs.mode == 'publish'
-      uses: bffless/deploy-proxy-rules@v1
-      with:
-        path: ${{ steps.prepare.outputs.dir }}
-        path-prefix: /api/${{ inputs.alias }}
-        api-url: ${{ inputs.api-url }}
-        api-key: ${{ inputs.api-key }}
-        project: ${{ inputs.repository }}
-        prune: ${{ inputs.prune }}
-        summary-title: Workflow rules (${{ inputs.alias }})
-
-    - name: Deploy the bundle
-      id: upload
-      if: inputs.mode == 'publish'
-      uses: bffless/upload-artifact@v1
-      with:
-        path: ${{ inputs.path }}
-        base-path: /
-        api-url: ${{ inputs.api-url }}
-        api-key: ${{ inputs.api-key }}
-        repository: ${{ inputs.repository }}
-        alias: ${{ inputs.alias }}
-        proxy-rule-set-names: ${{ inputs.alias }}
-        summary-title: Workflow bundle (${{ inputs.alias }})
-
-    - name: Attach the rule set to the harness alias
-      if: inputs.mode == 'publish'
-      shell: bash
-      env:
+        # The key reaches the CLI through the environment only — never argv, where it would
+        # land in the runner's process list (the CLI reads BFFLESS_API_KEY and nothing else).
         BFFLESS_API_KEY: ${{ inputs.api-key }}
+        WORKFLOW_VERSION: ${{ inputs.workflow-version }}
         API_URL: ${{ inputs.api-url }}
         REPOSITORY: ${{ inputs.repository }}
-        HARNESS_ALIAS: ${{ inputs.harness-alias }}
-        RULE_SET_ID: ${{ steps.rules.outputs.rule-set-ids }}
-        ACTION_PATH: ${{ github.action_path }}
+        ALIAS: ${{ steps.cfg.outputs.alias }}
+        HARNESS_ALIAS: ${{ steps.cfg.outputs.harness-alias }}
+        OUT: ${{ inputs.path }}
+        WORKFLOWS: ${{ inputs.workflows }}
+        RULES: ${{ inputs.rules }}
+        NAME: ${{ inputs.name }}
+        DESCRIPTION: ${{ inputs.description }}
       run: |
         set -euo pipefail
-        node "$ACTION_PATH/scripts/attach.mjs" --api-url "$API_URL" --repository "$REPOSITORY" \
-          --harness-alias "$HARNESS_ALIAS" --rule-set-id "$RULE_SET_ID"
+        args=(publish
+          --api-url "$API_URL"
+          --project "$REPOSITORY"
+          --alias "$ALIAS"
+          --harness-alias "$HARNESS_ALIAS"
+          --path "$OUT"
+          --workflows "$WORKFLOWS")
+        # Omitted, not empty. Each of these three has a CLI-side default that is exactly
+        # what v1 resolved here (rules -> .bffless/proxy-rules/<alias>, name -> the alias,
+        # description -> absent), and passing `--rules ''` would be a usage error rather
+        # than "use the default". --name/--description need @bffless/workflow >= 1.1.0
+        # (bffless/apps#569); see the `workflow-version` input.
+        if [ -n "$RULES" ]; then args+=(--rules "$RULES"); fi
+        if [ -n "$NAME" ]; then args+=(--name "$NAME"); fi
+        if [ -n "$DESCRIPTION" ]; then args+=(--description "$DESCRIPTION"); fi
+        npx --yes "@bffless/workflow@$WORKFLOW_VERSION" "${args[@]}"
 
+    # Teardown stays in-repo: preview lifecycle is CI's concern, and the CLI deliberately
+    # has no teardown verb (an authoring CLI never deletes someone's alias).
     - name: Tear down the preview
       id: teardown
       if: inputs.mode == 'teardown'
@@ -274,8 +302,8 @@ runs:
         BFFLESS_API_KEY: ${{ inputs.api-key }}
         API_URL: ${{ inputs.api-url }}
         REPOSITORY: ${{ inputs.repository }}
-        HARNESS_ALIAS: ${{ inputs.harness-alias }}
-        ALIAS: ${{ inputs.alias }}
+        HARNESS_ALIAS: ${{ steps.cfg.outputs.harness-alias }}
+        ALIAS: ${{ steps.cfg.outputs.alias }}
         PREVIEW: ${{ inputs.preview }}
         ACTION_PATH: ${{ github.action_path }}
       run: |

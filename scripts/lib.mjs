@@ -1,7 +1,12 @@
 /**
- * Shared plumbing for the publish-workflow scripts (attach.mjs, teardown.mjs): CE's
- * repo-aliases contract, the tiny argv parser, and the "run only when invoked directly"
- * guard. Kept dependency-free — no build step needed, just like the scripts that use it.
+ * Shared plumbing for the publish-workflow scripts: CE's repo-aliases contract, the tiny
+ * argv parser, and the "run only when invoked directly" guard. Kept dependency-free — no
+ * build step needed, just like the script that uses it.
+ *
+ * As of v2 that script is teardown.mjs alone — the publish path is `npx @bffless/workflow
+ * publish`, which carries its own port of what attach.mjs and prepare-rules.mjs used to do.
+ * This module stays separate rather than folding into teardown.mjs because the CE contract
+ * below is worth stating in one place, independent of the one caller that reads it today.
  *
  * CE contract (apps/backend/src/repo-browser/repo-browser.controller.ts,
  * apps/backend/src/proxy-rules/proxy-rule-sets.controller.ts):
@@ -75,14 +80,11 @@ export function ruleSetIdsOf(alias) {
   return alias.proxyRuleSetId ? [alias.proxyRuleSetId] : []
 }
 
-/** Append `id` unless it is already present; order is the harness's rule precedence. */
-export function unionIds(existing, id) {
-  const ids = Array.isArray(existing) ? [...existing] : []
-  if (!ids.includes(id)) ids.push(id)
-  return ids
-}
-
-/** Remove `id` if present; order of the remainder is preserved. Inverse of `unionIds`. */
+/**
+ * Remove `id` if present; order of the remainder is preserved. The inverse of the union
+ * publish performs — which now lives in `@bffless/workflow`'s `attachToHarness`, ported
+ * from the attach.mjs this repo carried through v1.
+ */
 export function withoutIds(existing, id) {
   const ids = Array.isArray(existing) ? [...existing] : []
   return ids.filter((x) => x !== id)

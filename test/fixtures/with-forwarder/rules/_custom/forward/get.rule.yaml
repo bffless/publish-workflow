@@ -1,4 +1,0 @@
-pathPattern: /w/mine/*
-targetUrl: https://mine.example.test
-forwardCookies: true
-order: 5
