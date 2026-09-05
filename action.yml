@@ -205,9 +205,16 @@ runs:
         SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
+        # `--alias` names the set the lint resolves paths against AS IT WILL BE PUBLISHED:
+        # the prepare step below renames `ruleset.yaml`'s `name:` to `$ALIAS`, so a preview
+        # (`hello-pr-7` over a set authored as `hello`) is legitimately synced under
+        # /api/hello-pr-7. Without it, @bffless/workflow-lint >= 1.5 reads the alias from
+        # the authored `name:` and its `path-prefix-mismatch` check fails every preview
+        # publish (bffless/apps#567 added the check; `workflow publish` in v2 already passes
+        # the alias through).
         npx --yes "@bffless/workflow-lint@$LINT_VERSION" index "$WORKFLOWS" \
           --out "$OUT" --impl "$ALIAS" --name "$NAME" --description "$DESCRIPTION" \
-          --rules "$RULES" --path-prefix "/api/$ALIAS" --commit "$SHA"
+          --rules "$RULES" --alias "$ALIAS" --path-prefix "/api/$ALIAS" --commit "$SHA"
 
     - name: Prepare the rule set (rename + forwarder)
       id: prepare
