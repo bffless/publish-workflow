@@ -60,14 +60,23 @@ inputs:
     description: 'One line about the bundle, shown on the Implementations screen'
     required: false
     default: ''
+  driver-repo:
+    description: >-
+      The GitHub repo (owner/name) whose `.github/workflows/workflow-drive.yml` the
+      harness dispatches to drive this implementation's runs (bffless/apps ADR-0006):
+      written into `index.json` as `driver.repo`. Defaults to the repo this action runs
+      in. Pass an empty string to publish no driver.
+    required: false
+    default: ${{ github.repository }}
   workflow-version:
     description: >-
-      npm range for @bffless/workflow, the CLI this action wraps. The floor is 1.1.0 —
-      the release that added `publish --name` / `--description` (bffless/apps#569), which
-      the `name` and `description` inputs above are mapped onto. Narrowing this below
-      1.1.0 makes those two inputs a usage error inside the CLI.
+      npm range for @bffless/workflow, the CLI this action wraps. The floor is 1.2.0 —
+      the release that added `publish --driver-repo` (bffless/apps#598), which the
+      `driver-repo` input is mapped onto; `--name` / `--description` came in 1.1.0
+      (bffless/apps#569). Narrowing this below 1.2.0 makes `driver-repo` a usage error
+      inside the CLI.
     required: false
-    default: '^1.1.0'
+    default: '^1.2.0'
   preview:
     description: >-
       Teardown mode only: opt in to tearing down an alias that does not match the
@@ -273,6 +282,7 @@ runs:
         RULES: ${{ inputs.rules }}
         NAME: ${{ inputs.name }}
         DESCRIPTION: ${{ inputs.description }}
+        DRIVER_REPO: ${{ inputs.driver-repo }}
       run: |
         set -euo pipefail
         args=(publish
@@ -290,6 +300,9 @@ runs:
         if [ -n "$RULES" ]; then args+=(--rules "$RULES"); fi
         if [ -n "$NAME" ]; then args+=(--name "$NAME"); fi
         if [ -n "$DESCRIPTION" ]; then args+=(--description "$DESCRIPTION"); fi
+        # --driver-repo needs @bffless/workflow >= 1.2.0 (bffless/apps#598): index.json's
+        # driver.repo, the repo the harness's drive rule sends a repository_dispatch to.
+        if [ -n "$DRIVER_REPO" ]; then args+=(--driver-repo "$DRIVER_REPO"); fi
         npx --yes "@bffless/workflow@$WORKFLOW_VERSION" "${args[@]}"
 
     # Teardown stays in-repo: preview lifecycle is CI's concern, and the CLI deliberately
