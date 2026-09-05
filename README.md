@@ -19,7 +19,7 @@ No `alias:` — it comes from the implementation's own `.bffless/workflow.json`.
 
 > **v2 needs `@bffless/workflow` >= 1.1.0**, the release that added
 > `publish --name` / `--description` ([bffless/apps#569](https://github.com/bffless/apps/pull/569)) —
-> the `workflow-version` default (`^1.1.0`) already pins that floor. Narrow it below 1.1.0
+> the `workflow-version` default (`^1.2.0`) already pins above that floor. Narrow it below 1.1.0
 > and those two inputs become a usage error inside the CLI.
 
 ## What it does
@@ -260,7 +260,8 @@ Other behaviour differences worth knowing:
 | `harness-alias` | no | the identity file's `harness`, else `workflow` | The alias carrying the union of implementation rule sets. |
 | `name` | no | the alias | Display name on the Implementations screen. Publish mode only. |
 | `description` | no | — | One line about the bundle. Publish mode only. |
-| `workflow-version` | no | `^1.1.0` | npm range for `@bffless/workflow`, the CLI this action wraps. **1.1.0 is the floor** — the release carrying `publish --name`/`--description`. |
+| `driver-repo` | no | the repo this action runs in | Written into `index.json` as `driver.repo`: the repo whose `.github/workflows/workflow-drive.yml` the harness dispatches to drive runs headless ([bffless/apps ADR-0006](https://github.com/bffless/apps/blob/main/apps/workflow/docs/adr/0006-driven-runs.md)). Pass `''` to publish no driver. Publish mode only. |
+| `workflow-version` | no | `^1.2.0` | npm range for `@bffless/workflow`, the CLI this action wraps. **1.2.0 is the floor** — the release carrying `publish --driver-repo` (`--name`/`--description` came in 1.1.0). |
 | `preview` | no | `false` | Teardown mode only: opt in to tearing down an alias that does not match the preview grammar. |
 | `target-url`, `backend-url`, `prune`, `lint-version` | no | v1's defaults | **Removed in v2** — declared only so that setting one fails loudly. See [Migrating from v1](#migrating-from-v1). |
 

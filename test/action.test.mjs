@@ -43,7 +43,7 @@ function runStep(target, env = {}, extra = {}) {
 
 test('declares the documented inputs, with the documented defaults', () => {
   assert.deepEqual(Object.keys(action.inputs).sort(), [
-    'alias', 'api-key', 'api-url', 'backend-url', 'description', 'harness-alias', 'lint-version',
+    'alias', 'api-key', 'api-url', 'backend-url', 'description', 'driver-repo', 'harness-alias', 'lint-version',
     'mode', 'name', 'path', 'preview', 'prune', 'repository', 'rules', 'target-url',
     'workflow-version', 'workflows',
   ])
@@ -62,9 +62,12 @@ test('declares the documented inputs, with the documented defaults', () => {
   assert.equal(action.inputs.rules.default, '')
   assert.equal(action.inputs.name.default, '')
   assert.equal(action.inputs.description.default, '')
-  // 1.1.0 is the floor: the release that added `publish --name` / `--description`
-  // (bffless/apps#569), which the name/description inputs are mapped onto.
-  assert.equal(action.inputs['workflow-version'].default, '^1.1.0')
+  // 1.2.0 is the floor: the release that added `publish --driver-repo` (bffless/apps#598),
+  // which the driver-repo input is mapped onto; --name/--description came in 1.1.0.
+  assert.equal(action.inputs['workflow-version'].default, '^1.2.0')
+  // driver-repo defaults to the repo the action runs in — index.json's driver.repo (ADR-0006).
+  assert.equal(action.inputs['driver-repo'].required, false)
+  assert.equal(action.inputs['driver-repo'].default, '${{ github.repository }}')
   assert.equal(action.inputs.mode.default, 'publish')
   assert.equal(action.inputs.preview.default, 'false')
 })
@@ -351,9 +354,9 @@ function stubNpx() {
 }
 
 const PUBLISH_DEFAULTS = {
-  BFFLESS_API_KEY: 'secret', WORKFLOW_VERSION: '^1.1.0', API_URL: 'https://j5s.dev',
+  BFFLESS_API_KEY: 'secret', WORKFLOW_VERSION: '^1.2.0', API_URL: 'https://j5s.dev',
   REPOSITORY: 'bffless/workflow', ALIAS: 'hello', HARNESS_ALIAS: 'workflow', OUT: 'dist',
-  WORKFLOWS: '.bffless/workflows', RULES: '', NAME: '', DESCRIPTION: '',
+  WORKFLOWS: '.bffless/workflows', RULES: '', NAME: '', DESCRIPTION: '', DRIVER_REPO: '',
 }
 
 function runPublish(env = {}) {
@@ -367,10 +370,11 @@ test('the publish step invokes the pinned CLI with every input mapped to its fla
     RULES: '.bffless/proxy-rules/hello',
     NAME: 'Hello World',
     DESCRIPTION: 'A demo implementation.',
+    DRIVER_REPO: 'acme/site',
   })
   assert.equal(failed, false)
   assert.deepEqual(argv, [
-    '--yes', '@bffless/workflow@^1.1.0', 'publish',
+    '--yes', '@bffless/workflow@^1.2.0', 'publish',
     '--api-url', 'https://j5s.dev',
     '--project', 'bffless/workflow',
     '--alias', 'hello',
@@ -380,15 +384,16 @@ test('the publish step invokes the pinned CLI with every input mapped to its fla
     '--rules', '.bffless/proxy-rules/hello',
     '--name', 'Hello World',
     '--description', 'A demo implementation.',
+    '--driver-repo', 'acme/site',
   ])
 })
 
-test('the publish step omits --rules / --name / --description when the input is blank', () => {
+test('the publish step omits --rules / --name / --description / --driver-repo when the input is blank', () => {
   // Each has a CLI-side default that is exactly what v1 resolved in its own step
   // (.bffless/proxy-rules/<alias>, the alias, and absent respectively), and passing
   // `--rules ''` would be a usage error rather than "use the default".
   const argv = runPublish().argv
-  for (const flag of ['--rules', '--name', '--description']) {
+  for (const flag of ['--rules', '--name', '--description', '--driver-repo']) {
     assert.ok(!argv.includes(flag), `${flag} must be omitted, not passed empty`)
   }
 })
